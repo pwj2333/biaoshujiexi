@@ -1,0 +1,8 @@
+﻿.agents/
+.codex/
+__pycache__/
+*.pyc
+startup.log
+data/
+招标文件/
+.env
