@@ -768,6 +768,10 @@ async function saveConfig() {
   showToast('AI 配置已保存');
 }
 
+function hasConfigFormValues() {
+  return Boolean($('baseUrl').value.trim() && $('modelName').value.trim() && $('apiKey').value.trim());
+}
+
 async function testConfig() {
   const result = await request('/api/config/test', {
     method: 'POST',
@@ -793,6 +797,12 @@ function ensureDefaultTracking() {
 async function parseFile() {
   const file = $('fileInput').files[0];
   if (!file) throw new Error('请先选择标书文件');
+  if (!$('baseUrl').value.trim() || !$('modelName').value.trim() || !$('apiKey').value.trim()) {
+    throw new Error('请先填写并保存 AI 配置，至少需要 Base URL、模型名称和 API Key。');
+  }
+  if (hasConfigFormValues()) {
+    await saveConfig();
+  }
   state.currentProjectId = '';
   state.registerMode = $('registerMode').value;
   setStatus('fileStatus', '解析中', 'warn');
@@ -976,11 +986,17 @@ function bindEvents() {
   };
 
   $('parseBtn').onclick = async () => {
+    const button = $('parseBtn');
     try {
+      button.disabled = true;
+      button.textContent = '解析中...';
       await parseFile();
     } catch (error) {
       setStatus('fileStatus', '解析失败', 'error');
       showToast(error.message, true);
+    } finally {
+      button.disabled = false;
+      button.textContent = '开始解析';
     }
   };
 
