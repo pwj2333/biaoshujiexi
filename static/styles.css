@@ -651,3 +651,111 @@ button.danger {
     align-items: stretch;
   }
 }
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at top, rgba(196, 224, 255, 0.7), transparent 42%),
+    linear-gradient(135deg, rgba(12, 26, 42, 0.88), rgba(24, 56, 82, 0.92));
+  backdrop-filter: blur(10px);
+}
+
+.login-page {
+  min-height: 100vh;
+  margin: 0;
+}
+
+.login-stage {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 40px 24px;
+  background:
+    radial-gradient(circle at 20% 15%, rgba(255, 212, 168, 0.32), transparent 28%),
+    radial-gradient(circle at 80% 10%, rgba(255, 245, 221, 0.78), transparent 22%),
+    linear-gradient(135deg, #f4ecde 0%, #eadcc7 45%, #f8f2e8 100%);
+}
+
+.login-module {
+  width: min(960px, 100%);
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  gap: 28px;
+  align-items: stretch;
+}
+
+.login-module__intro {
+  padding: 42px 36px;
+  border-radius: 30px;
+  background:
+    linear-gradient(180deg, rgba(255, 252, 247, 0.92), rgba(255, 247, 235, 0.88)),
+    linear-gradient(135deg, rgba(201, 114, 55, 0.08), rgba(111, 68, 31, 0.08));
+  border: 1px solid rgba(138, 97, 55, 0.12);
+  box-shadow: 0 28px 80px rgba(104, 73, 44, 0.14);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+}
+
+.login-module__intro h1 {
+  margin: 0;
+  font-size: clamp(34px, 4vw, 52px);
+  line-height: 1.08;
+}
+
+.login-card {
+  width: min(420px, 100%);
+  padding: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 24px 80px rgba(8, 18, 32, 0.25);
+}
+
+.login-card--standalone {
+  width: 100%;
+  align-self: center;
+  border-radius: 30px;
+  padding: 34px 30px 28px;
+  background: rgba(255, 252, 247, 0.96);
+  border: 1px solid rgba(138, 97, 55, 0.14);
+  box-shadow: 0 28px 80px rgba(104, 73, 44, 0.16);
+}
+
+.login-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.login-card__head h2 {
+  margin: 0;
+}
+
+.login-submit {
+  margin-top: 10px;
+}
+
+.compact-logout {
+  margin-top: 12px;
+  align-self: flex-start;
+}
+
+@media (max-width: 900px) {
+  .login-module {
+    grid-template-columns: 1fr;
+  }
+
+  .login-module__intro {
+    padding: 28px 24px;
+  }
+}

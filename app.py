@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import hashlib
+import hmac
 import re
 import subprocess
 import uuid
@@ -14,8 +16,8 @@ from zipfile import BadZipFile, ZipFile
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import Cookie, Depends, FastAPI, File, Header, HTTPException, Response, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
@@ -31,9 +33,15 @@ DATA_DIR = BASE_DIR / 'data'
 TMP_DIR = DATA_DIR / 'tmp'
 PROJECTS_DIR = DATA_DIR / 'projects'
 CONFIG_PATH = DATA_DIR / 'config.json'
+USERS_PATH = DATA_DIR / 'users.json'
 PACKAGE_EXTRACTION_TEMPLATE_PATH = PACKAGE_TEMPLATE_DIR / 'extraction_template.xlsx'
 PACKAGE_REGISTER_TEMPLATE_PATH = PACKAGE_TEMPLATE_DIR / '招标登记.xlsx'
 SESSION_TTL = timedelta(hours=4)
+AUTH_TTL = timedelta(hours=12)
+PASSWORD_SALT = 'ruico-bid-parser'
+DEFAULT_ADMIN_USERNAME = 'ruico'
+DEFAULT_ADMIN_PASSWORD = 'Ruico668@'
+AUTH_COOKIE_NAME = 'bid_parser_token'
 
 for folder in (DATA_DIR, TMP_DIR, PROJECTS_DIR):
     folder.mkdir(parents=True, exist_ok=True)
@@ -205,6 +213,130 @@ JSON_REPAIR_SYSTEM_PROMPT = """
 """.strip()
 
 SESSIONS: dict[str, dict[str, Any]] = {}
+AUTH_SESSIONS: dict[str, dict[str, Any]] = {}
+
+
+def hash_password(password: str) -> str:
+    # ponytail: 先用 salted sha256 落地单机 demo；要上公网时再换成 bcrypt/argon2。
+    return hashlib.sha256(f'{PASSWORD_SALT}:{password}'.encode('utf-8')).hexdigest()
+
+
+def default_admin_user() -> dict[str, Any]:
+    return {
+        'username': DEFAULT_ADMIN_USERNAME,
+        'password_hash': hash_password(DEFAULT_ADMIN_PASSWORD),
+        'display_name': '系统管理员',
+        'role': 'admin',
+        'created_at': datetime.now().isoformat(timespec='seconds'),
+    }
+
+
+def load_users() -> dict[str, Any]:
+    if not USERS_PATH.exists():
+        payload = {'users': [default_admin_user()]}
+        USERS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        return payload
+    try:
+        payload = json.loads(USERS_PATH.read_text(encoding='utf-8'))
+    except json.JSONDecodeError:
+        payload = {'users': [default_admin_user()]}
+        USERS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        return payload
+    users = payload.get('users') if isinstance(payload, dict) else None
+    if not isinstance(users, list):
+        payload = {'users': [default_admin_user()]}
+        USERS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        return payload
+    if not any((item or {}).get('username') == DEFAULT_ADMIN_USERNAME for item in users if isinstance(item, dict)):
+        users.insert(0, default_admin_user())
+        USERS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    return payload
+
+
+def save_users(payload: dict[str, Any]) -> dict[str, Any]:
+    USERS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    return payload
+
+
+def find_user(username: str) -> dict[str, Any] | None:
+    username = compact_text(username).lower()
+    for user in load_users().get('users', []):
+        if compact_text((user or {}).get('username', '')).lower() == username:
+            return user
+    return None
+
+
+def sanitize_user(user: dict[str, Any]) -> dict[str, Any]:
+    return {
+        'username': compact_text(user.get('username', '')),
+        'display_name': compact_text(user.get('display_name', '')),
+        'role': compact_text(user.get('role', 'user')) or 'user',
+        'created_at': compact_text(user.get('created_at', '')),
+    }
+
+
+def cleanup_auth_sessions() -> None:
+    now = datetime.now()
+    expired = [
+        token
+        for token, payload in AUTH_SESSIONS.items()
+        if now - payload['created_at'] > AUTH_TTL
+    ]
+    for token in expired:
+        AUTH_SESSIONS.pop(token, None)
+
+
+def create_auth_session(user: dict[str, Any]) -> dict[str, Any]:
+    cleanup_auth_sessions()
+    token = uuid.uuid4().hex
+    payload = {
+        'token': token,
+        'user': sanitize_user(user),
+        'created_at': datetime.now(),
+    }
+    AUTH_SESSIONS[token] = payload
+    return {'token': token, 'user': payload['user']}
+
+
+def extract_auth_token(authorization: str | None = None, auth_cookie: str | None = None) -> str:
+    if authorization and authorization.startswith('Bearer '):
+        return authorization.split(' ', 1)[1].strip()
+    return compact_text(auth_cookie)
+
+
+def require_auth(
+    authorization: str | None = Header(default=None),
+    auth_cookie: str | None = Cookie(default=None, alias=AUTH_COOKIE_NAME),
+) -> dict[str, Any]:
+    cleanup_auth_sessions()
+    token = extract_auth_token(authorization, auth_cookie)
+    if not token:
+        raise HTTPException(status_code=401, detail='请先登录。')
+    session = AUTH_SESSIONS.get(token)
+    if not session:
+        raise HTTPException(status_code=401, detail='登录已失效，请重新登录。')
+    return session['user']
+
+
+def require_admin(
+    authorization: str | None = Header(default=None),
+    auth_cookie: str | None = Cookie(default=None, alias=AUTH_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = require_auth(authorization, auth_cookie)
+    if user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail='只有管理员可以执行该操作。')
+    return user
+
+
+def resolve_auth_user(authorization: str | None = None, auth_cookie: str | None = None) -> dict[str, Any] | None:
+    cleanup_auth_sessions()
+    token = extract_auth_token(authorization, auth_cookie)
+    if not token:
+        return None
+    session = AUTH_SESSIONS.get(token)
+    if not session:
+        return None
+    return session['user']
 
 
 class ConfigPayload(BaseModel):
@@ -261,6 +393,18 @@ class ProjectPayload(BaseModel):
     our_quotes: list[dict[str, Any]] = Field(default_factory=list)
     competitor_quotes: list[dict[str, Any]] = Field(default_factory=list)
     timeline: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class LoginPayload(BaseModel):
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+
+
+class CreateUserPayload(BaseModel):
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+    display_name: str = ''
+    role: str = 'user'
 
 
 def cleanup_sessions() -> None:
@@ -1674,12 +1818,27 @@ def project_register_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
 
 
 @app.get('/')
-def index() -> FileResponse:
+def root() -> RedirectResponse:
+    return RedirectResponse(url='/login', status_code=302)
+
+
+@app.get('/app')
+def index(
+    authorization: str | None = Header(default=None),
+    auth_cookie: str | None = Cookie(default=None, alias=AUTH_COOKIE_NAME),
+):
+    if not resolve_auth_user(authorization, auth_cookie):
+        return RedirectResponse(url='/login', status_code=302)
     return FileResponse(STATIC_DIR / 'index.html')
 
 
+@app.get('/login')
+def login_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / 'login.html')
+
+
 @app.get('/api/template-meta')
-def template_meta() -> dict[str, Any]:
+def template_meta(_: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     workbook = load_workbook(get_register_template_path(), read_only=True)
     sheet_names = workbook.sheetnames
     workbook.close()
@@ -1692,18 +1851,87 @@ def template_meta() -> dict[str, Any]:
     }
 
 
+@app.post('/api/auth/login')
+def login(payload: LoginPayload, response: Response) -> dict[str, Any]:
+    user = find_user(payload.username)
+    if not user:
+        raise HTTPException(status_code=401, detail='账号或密码错误。')
+    password_hash = hash_password(payload.password)
+    if not hmac.compare_digest(user.get('password_hash', ''), password_hash):
+        raise HTTPException(status_code=401, detail='账号或密码错误。')
+    session = create_auth_session(user)
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=session['token'],
+        httponly=True,
+        samesite='lax',
+        max_age=int(AUTH_TTL.total_seconds()),
+        path='/',
+    )
+    return session
+
+
+@app.post('/api/auth/logout')
+def logout(
+    response: Response,
+    authorization: str | None = Header(default=None),
+    auth_cookie: str | None = Cookie(default=None, alias=AUTH_COOKIE_NAME),
+) -> dict[str, Any]:
+    token = extract_auth_token(authorization, auth_cookie)
+    if token:
+        AUTH_SESSIONS.pop(token, None)
+    response.delete_cookie(AUTH_COOKIE_NAME, path='/')
+    return {'ok': True}
+
+
+@app.get('/api/auth/me')
+def me(user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    return {'user': user}
+
+
+@app.get('/api/users')
+def list_users(_: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    users = [sanitize_user(user) for user in load_users().get('users', []) if isinstance(user, dict)]
+    return {'items': users}
+
+
+@app.post('/api/users')
+def create_user(payload: CreateUserPayload, _: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    username = compact_text(payload.username)
+    if not username:
+        raise HTTPException(status_code=400, detail='用户名不能为空。')
+    if find_user(username):
+        raise HTTPException(status_code=400, detail='该用户名已存在。')
+    role = compact_text(payload.role).lower() or 'user'
+    if role not in {'admin', 'user'}:
+        raise HTTPException(status_code=400, detail='角色只能是 admin 或 user。')
+    users_payload = load_users()
+    users = users_payload.get('users', [])
+    users.append(
+        {
+            'username': username,
+            'password_hash': hash_password(payload.password),
+            'display_name': compact_text(payload.display_name) or username,
+            'role': role,
+            'created_at': datetime.now().isoformat(timespec='seconds'),
+        }
+    )
+    save_users(users_payload)
+    return {'user': sanitize_user(users[-1])}
+
+
 @app.get('/api/config')
-def get_config() -> dict[str, Any]:
+def get_config(_: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     return mask_config(load_config())
 
 
 @app.post('/api/config')
-def update_config(payload: ConfigPayload) -> dict[str, Any]:
+def update_config(payload: ConfigPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     return mask_config(save_config(payload.model_dump()))
 
 
 @app.post('/api/config/test')
-def test_config(payload: ConfigPayload) -> dict[str, Any]:
+def test_config(payload: ConfigPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     config = payload.model_dump()
     if not config['base_url'] or not config['api_key'] or not config['model']:
         raise HTTPException(status_code=400, detail='请先填写 URL、API Key 和模型名称。')
@@ -1717,33 +1945,39 @@ def test_config(payload: ConfigPayload) -> dict[str, Any]:
 
 
 @app.get('/api/projects')
-def list_projects(q: str = '', year: str = '', award_status: str = '', bid_status: str = '') -> dict[str, Any]:
+def list_projects(
+    q: str = '',
+    year: str = '',
+    award_status: str = '',
+    bid_status: str = '',
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
     items, stats = collect_project_items(q=q, year=year, award_status=award_status, bid_status=bid_status)
     return {'items': items, 'stats': stats}
 
 
 @app.post('/api/projects')
-def create_project(payload: ProjectPayload) -> dict[str, Any]:
+def create_project(payload: ProjectPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     project = save_project(uuid.uuid4().hex, payload)
     return {**project_meta(project), 'project': project}
 
 
 @app.get('/api/projects/{project_id}')
-def get_project(project_id: str) -> dict[str, Any]:
+def get_project(project_id: str, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     project = load_project(project_id)
     session_id = create_session_for_result(project['result'])
     return {**project, 'session_id': session_id}
 
 
 @app.put('/api/projects/{project_id}')
-def update_project(project_id: str, payload: ProjectPayload) -> dict[str, Any]:
+def update_project(project_id: str, payload: ProjectPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     existing = load_project(project_id)
     project = save_project(project_id, payload, created_at=existing.get('created_at'))
     return {**project_meta(project), 'project': project}
 
 
 @app.delete('/api/projects/{project_id}')
-def delete_project(project_id: str) -> dict[str, Any]:
+def delete_project(project_id: str, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     path = project_path(project_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail='项目不存在。')
@@ -1752,7 +1986,7 @@ def delete_project(project_id: str) -> dict[str, Any]:
 
 
 @app.post('/api/parse')
-async def parse_bid(file: UploadFile = File(...)) -> dict[str, Any]:
+async def parse_bid(file: UploadFile = File(...), _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     cleanup_sessions()
     suffix = Path(file.filename or '').suffix.lower()
     if suffix not in {'.pdf', '.doc', '.docx', '.xls', '.xlsx'}:
@@ -1774,7 +2008,7 @@ async def parse_bid(file: UploadFile = File(...)) -> dict[str, Any]:
 
 
 @app.post('/api/chat')
-def chat(payload: ChatPayload) -> dict[str, Any]:
+def chat(payload: ChatPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     cleanup_sessions()
     session = SESSIONS.get(payload.session_id)
     if not session:
@@ -1789,7 +2023,7 @@ def chat(payload: ChatPayload) -> dict[str, Any]:
 
 
 @app.post('/api/export/extraction')
-def export_extraction(payload: ExportExtractionPayload) -> StreamingResponse:
+def export_extraction(payload: ExportExtractionPayload, _: dict[str, Any] = Depends(require_auth)) -> StreamingResponse:
     raw_result = payload.result or {'extraction_fields': payload.extraction_fields}
     result = normalize_result_payload(raw_result)
     workbook = load_workbook(get_extraction_template_path())
@@ -1821,7 +2055,7 @@ def export_extraction(payload: ExportExtractionPayload) -> StreamingResponse:
 
 
 @app.post('/api/export/register')
-def export_register(payload: ExportRegisterPayload) -> StreamingResponse:
+def export_register(payload: ExportRegisterPayload, _: dict[str, Any] = Depends(require_auth)) -> StreamingResponse:
     workbook = load_workbook(get_register_template_path())
     sheet_name = compact_text(payload.sheet_name) or str(datetime.now().year)
     sheet = ensure_register_sheet(workbook, sheet_name)
@@ -1864,7 +2098,7 @@ def export_register(payload: ExportRegisterPayload) -> StreamingResponse:
 
 
 @app.post('/api/export/overview')
-def export_overview(payload: ExportOverviewPayload) -> StreamingResponse:
+def export_overview(payload: ExportOverviewPayload, _: dict[str, Any] = Depends(require_auth)) -> StreamingResponse:
     result = normalize_result_payload(payload.result)
     output = build_overview_workbook(
         payload.title,
@@ -1883,7 +2117,7 @@ def export_overview(payload: ExportOverviewPayload) -> StreamingResponse:
 
 
 @app.post('/api/export/our-quotes')
-def export_our_quotes(payload: ExportQuotePayload) -> StreamingResponse:
+def export_our_quotes(payload: ExportQuotePayload, _: dict[str, Any] = Depends(require_auth)) -> StreamingResponse:
     output = build_quote_workbook(
         title=compact_text(payload.title),
         follow_up=payload.follow_up,
@@ -1899,7 +2133,7 @@ def export_our_quotes(payload: ExportQuotePayload) -> StreamingResponse:
 
 
 @app.post('/api/export/competitor-quotes')
-def export_competitor_quotes(payload: ExportQuotePayload) -> StreamingResponse:
+def export_competitor_quotes(payload: ExportQuotePayload, _: dict[str, Any] = Depends(require_auth)) -> StreamingResponse:
     output = build_quote_workbook(
         title=compact_text(payload.title),
         follow_up=payload.follow_up,
@@ -1915,7 +2149,7 @@ def export_competitor_quotes(payload: ExportQuotePayload) -> StreamingResponse:
 
 
 @app.post('/api/export/ledger')
-def export_ledger(payload: ExportLedgerPayload) -> StreamingResponse:
+def export_ledger(payload: ExportLedgerPayload, _: dict[str, Any] = Depends(require_auth)) -> StreamingResponse:
     output = build_ledger_workbook(
         q=payload.q,
         year=payload.year,
@@ -1937,6 +2171,11 @@ async def http_error_handler(_: Any, exc: HTTPException) -> JSONResponse:
 
 
 def _self_check() -> None:
+    users_payload = load_users()
+    assert any(user.get('username') == DEFAULT_ADMIN_USERNAME for user in users_payload.get('users', []))
+    admin = find_user(DEFAULT_ADMIN_USERNAME)
+    assert admin is not None
+    assert hmac.compare_digest(admin.get('password_hash', ''), hash_password(DEFAULT_ADMIN_PASSWORD))
     sample = parse_json_text('```json {"ok": true} ```')
     assert sample['ok'] is True
     merged = merge_register_rows(

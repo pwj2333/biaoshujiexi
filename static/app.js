@@ -1,4 +1,7 @@
 const state = {
+  authToken: localStorage.getItem('bid_parser_token') || '',
+  currentUser: null,
+  users: [],
   sessionId: '',
   currentProjectId: '',
   sourceFileName: '',
@@ -81,13 +84,21 @@ const timelineColumns = [
 const $ = (id) => document.getElementById(id);
 
 async function request(url, options = {}) {
-  const response = await fetch(url, options);
+  const headers = new Headers(options.headers || {});
+  if (state.authToken) {
+    headers.set('Authorization', `Bearer ${state.authToken}`);
+  }
+  const response = await fetch(url, { ...options, headers });
   if (!response.ok) {
     let message = '请求失败';
     try {
       const data = await response.json();
       message = data.detail || message;
     } catch (_) {}
+    if (response.status === 401) {
+      clearAuth();
+      window.location.href = '/login';
+    }
     throw new Error(message);
   }
   const contentType = response.headers.get('content-type') || '';
@@ -104,6 +115,57 @@ function showToast(message, isError = false) {
   setTimeout(() => {
     toast.className = 'toast hidden';
   }, 2600);
+}
+
+function setAuth(token, user) {
+  state.authToken = token || '';
+  state.currentUser = user || null;
+  if (token) {
+    localStorage.setItem('bid_parser_token', token);
+  } else {
+    localStorage.removeItem('bid_parser_token');
+  }
+  renderCurrentUser();
+}
+
+function clearAuth() {
+  setAuth('', null);
+  state.users = [];
+}
+
+function renderCurrentUser() {
+  const user = state.currentUser;
+  $('userNavBtn').classList.toggle('hidden', user?.role !== 'admin');
+}
+
+function renderUserList() {
+  if (!state.currentUser || state.currentUser.role !== 'admin') {
+    $('userList').innerHTML = `<div class="project-empty">只有管理员可以查看账号列表</div>`;
+    return;
+  }
+  if (!state.users.length) {
+    $('userList').innerHTML = `<div class="project-empty">暂无账号</div>`;
+    return;
+  }
+  $('userList').innerHTML = `
+    <table class="dense-table">
+      <thead><tr><th>用户名</th><th>显示名称</th><th>角色</th><th>创建时间</th></tr></thead>
+      <tbody>
+        ${state.users
+          .map(
+            (user) => `
+              <tr>
+                <td>${user.username || '-'}</td>
+                <td>${user.display_name || '-'}</td>
+                <td>${user.role === 'admin' ? '管理员' : '普通用户'}</td>
+                <td>${user.created_at || '-'}</td>
+              </tr>
+            `
+          )
+          .join('')}
+      </tbody>
+    </table>
+  `;
 }
 
 function setStatus(id, text, className = 'neutral') {
@@ -607,6 +669,62 @@ async function loadProjects() {
   renderProjectList();
 }
 
+async function loadCurrentUser() {
+  const result = await request('/api/auth/me');
+  setAuth(state.authToken, result.user);
+}
+
+async function login() {
+  const result = await request('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: $('loginUsername').value.trim(),
+      password: $('loginPassword').value,
+    }),
+  });
+  setAuth(result.token, result.user);
+  $('loginPassword').value = '';
+}
+
+async function logout() {
+  try {
+    await request('/api/auth/logout', { method: 'POST' });
+  } catch (_) {}
+  clearAuth();
+  window.location.href = '/login';
+}
+
+async function loadUsers() {
+  if (state.currentUser?.role !== 'admin') {
+    state.users = [];
+    renderUserList();
+    return;
+  }
+  const result = await request('/api/users');
+  state.users = result.items || [];
+  renderUserList();
+}
+
+async function createUser() {
+  await request('/api/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: $('newUsername').value.trim(),
+      display_name: $('newDisplayName').value.trim(),
+      password: $('newPassword').value,
+      role: $('newUserRole').value,
+    }),
+  });
+  $('newUsername').value = '';
+  $('newDisplayName').value = '';
+  $('newPassword').value = '';
+  $('newUserRole').value = 'user';
+  await loadUsers();
+  showToast('账号创建成功');
+}
+
 async function loadMeta() {
   const meta = await request('/api/template-meta');
   state.templateMeta = meta;
@@ -837,6 +955,10 @@ function bindEvents() {
 
   $('configPreset').onchange = (event) => applyPreset(event.target.value);
 
+  $('logoutBtn').onclick = async () => {
+    await logout();
+  };
+
   $('saveConfigBtn').onclick = async () => {
     try {
       await saveConfig();
@@ -1004,17 +1126,47 @@ function bindEvents() {
       showToast(error.message, true);
     }
   };
+
+  $('createUserBtn').onclick = async () => {
+    try {
+      await createUser();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  };
+
+  $('refreshUsersBtn').onclick = async () => {
+    try {
+      await loadUsers();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  };
 }
 
 async function init() {
   try {
+    bindEvents();
+    renderCurrentUser();
+    renderUserList();
+    if (!state.authToken) {
+      window.location.href = '/login';
+      return;
+    }
+    await loadCurrentUser();
     await loadMeta();
     await loadConfig();
-    bindEvents();
     clearCurrentProject();
     await loadProjects();
+    if (state.currentUser?.role === 'admin') {
+      await loadUsers();
+    }
     switchPanel('overviewPanel');
   } catch (error) {
+    if (!state.authToken) {
+      window.location.href = '/login';
+      return;
+    }
     showToast(error.message, true);
   }
 }

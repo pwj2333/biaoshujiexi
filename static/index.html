@@ -22,6 +22,7 @@
           <button class="nav-link" data-target="registerPanel">登记预览</button>
           <button class="nav-link" data-target="chatPanel">AI 对话</button>
           <button class="nav-link" data-target="historyPanel">历史台账</button>
+          <button id="userNavBtn" class="nav-link hidden" data-target="userPanel">账号管理</button>
         </nav>
 
         <section class="upload-card">
@@ -110,6 +111,7 @@
           <div class="hero-note">
             <strong>当前版本</strong>
             <span>数据仍然只保存在 `data/projects` 的 JSON 文件中，不接数据库；但已经支持项目级增删改查、历史筛选、报价维护和结果导出。</span>
+            <button id="logoutBtn" class="ghost compact-logout">退出登录</button>
           </div>
         </section>
 
@@ -268,6 +270,55 @@
           <div class="chat-compose">
             <textarea id="chatInput" rows="3" placeholder="例如：本项目的投标截止时间是什么？保证金如何缴纳？"></textarea>
             <button id="sendChatBtn" class="primary">发送</button>
+          </div>
+        </section>
+
+        <section id="userPanel" class="content-panel hidden">
+          <div class="panel-head">
+            <div>
+              <h3>账号管理</h3>
+              <p>仅管理员可创建账号。普通账号可登录使用系统，但不能创建其他账号。</p>
+            </div>
+          </div>
+          <div class="tracking-grid">
+            <section class="tracking-card">
+              <div class="tracking-head">
+                <h4>新建账号</h4>
+                <span class="card-note">管理员专用</span>
+              </div>
+              <div class="form-grid">
+                <label class="field">
+                  <span>用户名</span>
+                  <input id="newUsername" placeholder="请输入用户名" />
+                </label>
+                <label class="field">
+                  <span>显示名称</span>
+                  <input id="newDisplayName" placeholder="例如：航运部-张三" />
+                </label>
+                <label class="field">
+                  <span>密码</span>
+                  <input id="newPassword" type="password" placeholder="请输入密码" />
+                </label>
+                <label class="field">
+                  <span>角色</span>
+                  <select id="newUserRole">
+                    <option value="user">普通用户</option>
+                    <option value="admin">管理员</option>
+                  </select>
+                </label>
+              </div>
+              <div class="button-row">
+                <button id="createUserBtn" class="primary">创建账号</button>
+              </div>
+            </section>
+
+            <section class="tracking-card">
+              <div class="tracking-head">
+                <h4>账号列表</h4>
+                <button id="refreshUsersBtn">刷新</button>
+              </div>
+              <div id="userList" class="table-wrap compact-table"></div>
+            </section>
           </div>
         </section>
       </main>

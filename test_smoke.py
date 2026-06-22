@@ -6,11 +6,17 @@ import httpx
 from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 
-from app import ProjectPayload, app, call_chat_completion, extract_document_text, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_project
+from app import ProjectPayload, app, call_chat_completion, extract_document_text, load_users, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_project, save_users
 
 
 def cleanup(project_id: str) -> None:
     project_path(project_id).unlink(missing_ok=True)
+
+
+def cleanup_user(username: str) -> None:
+    payload = load_users()
+    payload['users'] = [user for user in payload.get('users', []) if user.get('username') != username]
+    save_users(payload)
 
 
 sample = parse_json_text('```json {"ok": true} ```')
@@ -84,6 +90,24 @@ assert project_path(project_id).exists()
 cleanup(project_id)
 
 client = TestClient(app)
+cleanup_user('demo_user')
+
+root_resp = client.get('/', follow_redirects=False)
+assert root_resp.status_code in (302, 307)
+assert root_resp.headers['location'] == '/login'
+
+app_redirect_resp = client.get('/app', follow_redirects=False)
+assert app_redirect_resp.status_code in (302, 307)
+assert app_redirect_resp.headers['location'] == '/login'
+
+login_resp = client.post('/api/auth/login', json={'username': 'ruico', 'password': 'Ruico668@'})
+assert login_resp.status_code == 200
+token = login_resp.json()['token']
+auth_headers = {'Authorization': f'Bearer {token}'}
+assert 'bid_parser_token=' in (login_resp.headers.get('set-cookie') or '')
+
+app_resp = client.get('/app', headers=auth_headers)
+assert app_resp.status_code == 200
 
 project_payload = {
     'title': '接口测试项目',
@@ -192,17 +216,17 @@ project_payload = {
     },
 }
 
-create_resp = client.post('/api/projects', json=project_payload)
+create_resp = client.post('/api/projects', json=project_payload, headers=auth_headers)
 assert create_resp.status_code == 200
 created = create_resp.json()
 created_id = created['project_id']
 
-list_resp = client.get('/api/projects?q=接口测试')
+list_resp = client.get('/api/projects?q=接口测试', headers=auth_headers)
 assert list_resp.status_code == 200
 assert any(item['project_id'] == created_id for item in list_resp.json()['items'])
 assert list_resp.json()['stats']['awarded_projects'] >= 1
 
-get_resp = client.get(f'/api/projects/{created_id}')
+get_resp = client.get(f'/api/projects/{created_id}', headers=auth_headers)
 assert get_resp.status_code == 200
 project = get_resp.json()
 result = project['result']
@@ -217,6 +241,7 @@ overview_resp = client.post(
         'competitor_quotes': project['competitor_quotes'],
         'timeline': project['timeline'],
     },
+    headers=auth_headers,
 )
 assert overview_resp.status_code == 200
 wb_overview = load_workbook(BytesIO(overview_resp.content))
@@ -224,7 +249,7 @@ assert wb_overview['解析总览']['A1'].value == '标书解析总览'
 assert wb_overview['解析总览']['B2'].value == '接口测试项目'
 assert wb_overview['解析总览']['A4'].value == '核心信息'
 
-extraction_resp = client.post('/api/export/extraction', json={'result': result})
+extraction_resp = client.post('/api/export/extraction', json={'result': result}, headers=auth_headers)
 assert extraction_resp.status_code == 200
 wb = load_workbook(BytesIO(extraction_resp.content))
 assert wb.sheetnames[0] == '摘取结果'
@@ -232,10 +257,10 @@ assert '原文依据' in wb.sheetnames
 assert wb['摘取结果']['B2'].value == '2026/3/4 9:00'
 assert wb['原文依据']['B2'].value == '开标时间：2026/3/4 9:00'
 
-legacy_extraction_resp = client.post('/api/export/extraction', json={'extraction_fields': result['extraction_fields']})
+legacy_extraction_resp = client.post('/api/export/extraction', json={'extraction_fields': result['extraction_fields']}, headers=auth_headers)
 assert legacy_extraction_resp.status_code == 200
 
-register_resp = client.post('/api/export/register', json={'rows': result['register_rows'], 'sheet_name': '2028'})
+register_resp = client.post('/api/export/register', json={'rows': result['register_rows'], 'sheet_name': '2028'}, headers=auth_headers)
 assert register_resp.status_code == 200
 wb2 = load_workbook(BytesIO(register_resp.content))
 assert '2028' in wb2.sheetnames
@@ -250,6 +275,7 @@ assert sheet['N3'].alignment.horizontal == 'center'
 our_quotes_resp = client.post(
     '/api/export/our-quotes',
     json={'title': project['title'], 'follow_up': project['follow_up'], 'rows': project['our_quotes']},
+    headers=auth_headers,
 )
 assert our_quotes_resp.status_code == 200
 wb3 = load_workbook(BytesIO(our_quotes_resp.content))
@@ -259,6 +285,7 @@ assert wb3['报价一览']['E5'].value == '我司'
 competitor_quotes_resp = client.post(
     '/api/export/competitor-quotes',
     json={'title': project['title'], 'follow_up': project['follow_up'], 'rows': project['competitor_quotes']},
+    headers=auth_headers,
 )
 assert competitor_quotes_resp.status_code == 200
 wb4 = load_workbook(BytesIO(competitor_quotes_resp.content))
@@ -268,6 +295,7 @@ assert wb4['报价一览']['B5'].value == '竞对A'
 ledger_resp = client.post(
     '/api/export/ledger',
     json={'q': '接口测试', 'year': '2026', 'bid_status': '已投标', 'award_status': '已中标'},
+    headers=auth_headers,
 )
 assert ledger_resp.status_code == 200
 wb5 = load_workbook(BytesIO(ledger_resp.content))
@@ -286,10 +314,23 @@ bad_docx_resp = client.post(
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         )
     },
+    headers=auth_headers,
 )
 assert bad_docx_resp.status_code == 400
 assert 'DOCX 文件格式无效' in bad_docx_resp.json()['detail']
 
-delete_resp = client.delete(f'/api/projects/{created_id}')
+users_resp = client.get('/api/users', headers=auth_headers)
+assert users_resp.status_code == 200
+assert any(item['username'] == 'ruico' for item in users_resp.json()['items'])
+
+create_user_resp = client.post(
+    '/api/users',
+    json={'username': 'demo_user', 'password': 'Demo123@', 'display_name': '演示用户', 'role': 'user'},
+    headers=auth_headers,
+)
+assert create_user_resp.status_code == 200
+
+delete_resp = client.delete(f'/api/projects/{created_id}', headers=auth_headers)
 assert delete_resp.status_code == 200
 cleanup(created_id)
+cleanup_user('demo_user')
