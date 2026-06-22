@@ -57,7 +57,6 @@ textarea {
 }
 
 .brand-card,
-.history-card,
 .upload-card,
 .config-card,
 .hero-panel,
@@ -73,7 +72,6 @@ textarea {
 }
 
 .brand-card,
-.history-card,
 .upload-card,
 .config-card,
 .hero-panel,
@@ -82,7 +80,6 @@ textarea {
 }
 
 .brand-card,
-.history-card,
 .upload-card {
   padding: 18px;
   margin-bottom: 16px;
@@ -127,9 +124,7 @@ p {
 .panel-head,
 .button-row,
 .chat-compose,
-.review-head,
-.history-summary,
-.history-meta {
+ .review-head {
   display: flex;
   gap: 12px;
   align-items: center;
@@ -192,33 +187,27 @@ button.ghost {
   gap: 10px;
 }
 
-.history-card {
-  padding: 0;
-  overflow: hidden;
+.history-filters,
+.form-grid {
+  display: grid;
+  gap: 12px;
 }
 
-.history-summary {
-  list-style: none;
+.history-filters {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.history-layout {
+  display: grid;
+  gap: 16px;
+}
+
+.history-query-card {
+  border: 1px solid rgba(222, 205, 183, 0.85);
+  border-radius: 22px;
+  background: rgba(255, 251, 245, 0.82);
   padding: 18px;
-  cursor: pointer;
-}
-
-.history-summary::-webkit-details-marker {
-  display: none;
-}
-
-.history-meta {
-  gap: 10px;
-}
-
-.history-toggle {
-  font-size: 13px;
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.history-body {
-  padding: 0 18px 18px;
+  box-shadow: var(--shadow);
 }
 
 .project-list {
@@ -226,6 +215,35 @@ button.ghost {
   gap: 8px;
   max-height: 320px;
   overflow: auto;
+}
+
+.ledger-list {
+  max-height: none;
+}
+
+.history-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.history-stat {
+  border: 1px solid rgba(222, 205, 183, 0.85);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.58);
+  padding: 12px;
+}
+
+.history-stat span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.history-stat strong {
+  font-size: 22px;
 }
 
 .project-item,
@@ -240,6 +258,7 @@ button.ghost {
   display: grid;
   gap: 4px;
   padding: 12px 14px;
+  border: 1px solid rgba(222, 205, 183, 0.85);
 }
 
 .project-item.active,
@@ -250,6 +269,45 @@ button.ghost {
 
 .project-item strong {
   font-size: 14px;
+}
+
+.project-card-head,
+.project-tags {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.project-tags {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.project-tags span,
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--muted);
+}
+
+.status-chip.ok {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.status-chip.warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.status-chip.error {
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .project-empty {
@@ -320,6 +378,44 @@ button.ghost {
 
 .content-panel {
   padding: 22px;
+}
+
+.tracking-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.tracking-card {
+  border: 1px solid rgba(222, 205, 183, 0.85);
+  border-radius: 22px;
+  background: rgba(255, 251, 245, 0.82);
+  padding: 18px;
+  box-shadow: var(--shadow);
+}
+
+.tracking-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.compact-actions {
+  gap: 8px;
+}
+
+.card-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.field-span-2 {
+  grid-column: 1 / -1;
 }
 
 .panel-head {
@@ -425,6 +521,11 @@ button.ghost {
   overflow: auto;
 }
 
+.compact-table table,
+.dense-table {
+  min-width: 980px;
+}
+
 table {
   width: 100%;
   min-width: 1160px;
@@ -447,6 +548,14 @@ th {
 .label-col {
   width: 180px;
   font-weight: 600;
+}
+
+.action-col {
+  min-width: 88px;
+}
+
+button.danger {
+  color: var(--danger);
 }
 
 .chat-box {
@@ -519,7 +628,10 @@ th {
 
   .hero-panel,
   .summary-grid,
-  .analysis-grid {
+  .analysis-grid,
+  .history-stats,
+  .history-filters,
+  .form-grid {
     grid-template-columns: 1fr;
   }
 }

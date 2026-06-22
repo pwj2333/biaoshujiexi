@@ -1,9 +1,12 @@
+import tempfile
 from io import BytesIO
+from pathlib import Path
 
+import httpx
 from fastapi.testclient import TestClient
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
-from app import ProjectPayload, app, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_project
+from app import ProjectPayload, app, call_chat_completion, extract_document_text, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_project
 
 
 def cleanup(project_id: str) -> None:
@@ -22,6 +25,47 @@ merged = merge_register_rows(
 assert '02' in merged['bid_no']
 assert '2 个标段' in merged['remark']
 assert resolve_source_excerpt('股份有限公司', '...', '福建省东南电化股份有限公司') == '福建省东南电化股份有限公司'
+
+with tempfile.TemporaryDirectory() as temp_dir:
+    xlsx_path = Path(temp_dir) / 'sample.xlsx'
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = '招标信息'
+    sheet['A1'] = '项目名称'
+    sheet['B1'] = '测试招标项目'
+    sheet['A2'] = '投标截止'
+    sheet['B2'] = '2026-03-04 09:00'
+    workbook.save(xlsx_path)
+    workbook.close()
+    extracted = extract_document_text(xlsx_path, '.xlsx')
+    assert '工作表：招标信息' in extracted
+    assert '项目名称 | 测试招标项目' in extracted
+
+
+class DummyReadTimeoutClient:
+    calls = 0
+
+    @staticmethod
+    def post(*args, **kwargs):
+        DummyReadTimeoutClient.calls += 1
+        raise httpx.ReadTimeout('simulated read timeout')
+
+
+original_httpx_post = httpx.post
+httpx.post = DummyReadTimeoutClient.post
+try:
+    try:
+        call_chat_completion(
+            {'base_url': 'https://example.com/v1', 'api_key': 'sk-test', 'model': 'demo', 'temperature': 0.1},
+            system_prompt='test',
+            user_prompt='test',
+        )
+        raise AssertionError('expected timeout')
+    except Exception as exc:
+        assert '响应超时' in str(exc.detail)
+        assert DummyReadTimeoutClient.calls == 1
+finally:
+    httpx.post = original_httpx_post
 
 project_id = 'f' * 32
 cleanup(project_id)
@@ -46,6 +90,50 @@ project_payload = {
     'source_file_name': 'demo.pdf',
     'register_mode': 'packages',
     'sheet_name': '2026',
+    'follow_up': {
+        'bid_status': '已投标',
+        'award_status': '已中标',
+        'award_date': '2026-03-10',
+        'award_company': '我司',
+        'our_award_amount': '1280000',
+        'competitor_award_amount': '1310000',
+        'information_source': '业务补录',
+        'tracking_note': '完成中标补录',
+        'register_year': '2026',
+    },
+    'our_quotes': [
+        {
+            'package_name': '合同包1',
+            'round_no': 1,
+            'quote_date': '2026-03-01',
+            'quote_company': '我司',
+            'currency': 'CNY',
+            'tax_mode': '含税',
+            'unit_price': '650',
+            'total_price': '1280000',
+            'is_submitted': True,
+            'is_awarded': True,
+            'remark': '最终中标价',
+        }
+    ],
+    'competitor_quotes': [
+        {
+            'quote_company': '竞对A',
+            'package_name': '合同包1',
+            'quote_date': '2026-03-01',
+            'currency': 'CNY',
+            'unit_price': '665',
+            'total_price': '1310000',
+            'ranking': '2',
+            'is_awarded': False,
+            'source': '中标公示',
+            'remark': '次低价',
+        }
+    ],
+    'timeline': [
+        {'date': '2026-01-27', 'type': 'parse', 'note': '完成标书解析'},
+        {'date': '2026-03-10', 'type': 'award', 'note': '完成中标结果补录'},
+    ],
     'result': {
         'document_summary': {
             'project_name': '福建省东南电化股份有限公司2026年液碱海路运输业务',
@@ -112,14 +200,29 @@ created_id = created['project_id']
 list_resp = client.get('/api/projects?q=接口测试')
 assert list_resp.status_code == 200
 assert any(item['project_id'] == created_id for item in list_resp.json()['items'])
+assert list_resp.json()['stats']['awarded_projects'] >= 1
 
 get_resp = client.get(f'/api/projects/{created_id}')
 assert get_resp.status_code == 200
-result = get_resp.json()['result']
+project = get_resp.json()
+result = project['result']
 
-overview_resp = client.post('/api/export/overview', json={'result': result})
+overview_resp = client.post(
+    '/api/export/overview',
+    json={
+        'title': project['title'],
+        'result': result,
+        'follow_up': project['follow_up'],
+        'our_quotes': project['our_quotes'],
+        'competitor_quotes': project['competitor_quotes'],
+        'timeline': project['timeline'],
+    },
+)
 assert overview_resp.status_code == 200
-assert overview_resp.content.startswith(b'# ')
+wb_overview = load_workbook(BytesIO(overview_resp.content))
+assert wb_overview['解析总览']['A1'].value == '标书解析总览'
+assert wb_overview['解析总览']['B2'].value == '接口测试项目'
+assert wb_overview['解析总览']['A4'].value == '核心信息'
 
 extraction_resp = client.post('/api/export/extraction', json={'result': result})
 assert extraction_resp.status_code == 200
@@ -143,6 +246,49 @@ assert sheet['G3'].number_format == 'yyyy/m/d h:mm'
 assert sheet['H3'].value == 100000
 assert sheet['A3'].border.left.style == 'thin'
 assert sheet['N3'].alignment.horizontal == 'center'
+
+our_quotes_resp = client.post(
+    '/api/export/our-quotes',
+    json={'title': project['title'], 'follow_up': project['follow_up'], 'rows': project['our_quotes']},
+)
+assert our_quotes_resp.status_code == 200
+wb3 = load_workbook(BytesIO(our_quotes_resp.content))
+assert wb3['报价一览']['A1'].value == '我司报价一览表'
+assert wb3['报价一览']['E5'].value == '我司'
+
+competitor_quotes_resp = client.post(
+    '/api/export/competitor-quotes',
+    json={'title': project['title'], 'follow_up': project['follow_up'], 'rows': project['competitor_quotes']},
+)
+assert competitor_quotes_resp.status_code == 200
+wb4 = load_workbook(BytesIO(competitor_quotes_resp.content))
+assert wb4['报价一览']['A1'].value == '竞对报价对比'
+assert wb4['报价一览']['B5'].value == '竞对A'
+
+ledger_resp = client.post(
+    '/api/export/ledger',
+    json={'q': '接口测试', 'year': '2026', 'bid_status': '已投标', 'award_status': '已中标'},
+)
+assert ledger_resp.status_code == 200
+wb5 = load_workbook(BytesIO(ledger_resp.content))
+assert wb5['历史台账']['A1'].value == '历史台账汇总'
+assert wb5['历史台账']['D2'].value == '2026'
+assert wb5['历史台账']['F2'].value == '已投标'
+assert wb5['历史台账']['H2'].value == '已中标'
+assert wb5['历史台账']['B6'].value == '接口测试项目'
+
+bad_docx_resp = client.post(
+    '/api/parse',
+    files={
+        'file': (
+            'bad.docx',
+            b'not-a-real-docx',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        )
+    },
+)
+assert bad_docx_resp.status_code == 400
+assert 'DOCX 文件格式无效' in bad_docx_resp.json()['detail']
 
 delete_resp = client.delete(f'/api/projects/{created_id}')
 assert delete_resp.status_code == 200

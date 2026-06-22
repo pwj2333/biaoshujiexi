@@ -12,34 +12,16 @@
         <section class="brand-card">
           <p class="eyebrow">Tender Workspace</p>
           <h1>标书解析与登记</h1>
-          <p class="copy">左侧是折叠菜单和上传区，右侧集中展示解析、登记、导出和对话。</p>
+          <p class="copy">上传标书后先做 AI 解析，再把结果继续维护成项目档案，后续可查询中标结果、我司报价和竞对报价。</p>
         </section>
-
-        <details id="historyMenu" class="history-card collapsible">
-          <summary class="history-summary">
-            <div>
-              <p class="eyebrow">History</p>
-              <h2>历史记录</h2>
-            </div>
-            <div class="history-meta">
-              <span id="projectCount" class="pill neutral">0 条</span>
-              <span class="history-toggle">展开</span>
-            </div>
-          </summary>
-          <div class="history-body">
-            <label class="field">
-              <span>查询记录</span>
-              <input id="projectSearch" placeholder="按项目名称、招标编号、文件名搜索" />
-            </label>
-            <div id="projectList" class="project-list"></div>
-          </div>
-        </details>
 
         <nav class="side-nav">
           <button class="nav-link active" data-target="overviewPanel">解析总览</button>
+          <button class="nav-link" data-target="trackingPanel">项目跟踪</button>
           <button class="nav-link" data-target="extractionPanel">摘取结果</button>
           <button class="nav-link" data-target="registerPanel">登记预览</button>
           <button class="nav-link" data-target="chatPanel">AI 对话</button>
+          <button class="nav-link" data-target="historyPanel">历史台账</button>
         </nav>
 
         <section class="upload-card">
@@ -59,7 +41,7 @@
             <input
               id="fileInput"
               type="file"
-              accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              accept=".pdf,.doc,.docx,.xls,.xlsx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             />
           </label>
           <label class="field">
@@ -122,12 +104,12 @@
         <section class="hero-panel">
           <div>
             <p class="eyebrow">Bid Intelligence Demo</p>
-            <h2>解析后可直接保存为历史记录，后续再从菜单里展开查询</h2>
-            <p class="copy">摘取导出会分成两页：第一页放摘取结果，第二页放原文依据；登记导出按你给的最终模板列结构落表。</p>
+            <h2>解析只是入口，真正可复用的是历史项目跟踪、报价对比和中标结果追溯。</h2>
+            <p class="copy">摘取导出会分成两页：第一页放摘取结果，第二页用同一模板放原文依据；登记导出严格按项目目录下的模板文件生成。</p>
           </div>
           <div class="hero-note">
-            <strong>当前说明</strong>
-            <span>历史记录仍保存在 `data/projects`，不接数据库；导出年份由登记模板里的 sheet 决定。</span>
+            <strong>当前版本</strong>
+            <span>数据仍然只保存在 `data/projects` 的 JSON 文件中，不接数据库；但已经支持项目级增删改查、历史筛选、报价维护和结果导出。</span>
           </div>
         </section>
 
@@ -135,16 +117,16 @@
           <div class="panel-head">
             <div>
               <h3>解析总览</h3>
-              <p>先看关键字段、AI 结论和风险提示，再决定是否导出或继续追问。</p>
+              <p>先看关键字段、AI 分析和风险提示，再决定是否导出、保存或进入项目跟踪。</p>
             </div>
             <div class="button-row">
               <button id="askDefaultBtn">刷新分析建议</button>
-              <button id="exportOverviewBtn" class="primary">导出总览</button>
+              <button id="exportOverviewBtn" class="primary">导出总览 Excel</button>
             </div>
           </div>
           <div id="resultEmpty" class="empty-state">
             <strong>还没有解析结果</strong>
-            <span>从左侧上传标书，或展开历史记录后打开一条已有记录。</span>
+            <span>从左侧上传标书，或展开历史记录后打开一条已保存项目。</span>
           </div>
           <div id="resultSection" class="result-section hidden">
             <div id="summaryPanel" class="summary-grid"></div>
@@ -153,11 +135,110 @@
           </div>
         </section>
 
+        <section id="historyPanel" class="content-panel hidden">
+          <div class="panel-head">
+            <div>
+              <h3>历史台账</h3>
+              <p>在这里集中查询历史项目、查看汇总统计，并按当前筛选条件导出台账。</p>
+            </div>
+            <div class="button-row">
+              <span id="projectCount" class="pill neutral">0 条</span>
+              <button id="exportLedgerBtn" class="primary">导出台账</button>
+            </div>
+          </div>
+          <div class="history-layout">
+            <div class="history-query-card">
+              <label class="field">
+                <span>关键词</span>
+                <input id="projectSearch" placeholder="项目名称、招标编号、招标人、文件名" />
+              </label>
+              <div class="history-filters">
+                <label class="field">
+                  <span>登记年份</span>
+                  <input id="historyYear" placeholder="例如 2026" />
+                </label>
+                <label class="field">
+                  <span>投标状态</span>
+                  <select id="historyBidStatus">
+                    <option value="">全部</option>
+                    <option value="待跟进">待跟进</option>
+                    <option value="准备投标">准备投标</option>
+                    <option value="已投标">已投标</option>
+                    <option value="放弃">放弃</option>
+                    <option value="未投标">未投标</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>中标状态</span>
+                  <select id="historyAwardStatus">
+                    <option value="">全部</option>
+                    <option value="未知">未知</option>
+                    <option value="待定">待定</option>
+                    <option value="已中标">已中标</option>
+                    <option value="未中标">未中标</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div id="historyStats" class="history-stats"></div>
+            <div id="projectList" class="project-list ledger-list"></div>
+          </div>
+        </section>
+
+        <section id="trackingPanel" class="content-panel hidden">
+          <div class="panel-head">
+            <div>
+              <h3>项目跟踪</h3>
+              <p>这里维护投标结果、我司报价、竞对报价和时间线，保存后可在历史记录里持续查询。</p>
+            </div>
+            <span class="pill neutral">JSON 归档</span>
+          </div>
+          <div class="tracking-grid">
+            <section class="tracking-card">
+              <div class="tracking-head">
+                <h4>跟踪结果</h4>
+                <span class="card-note">当前项目结论</span>
+              </div>
+              <div id="followUpForm" class="form-grid"></div>
+            </section>
+
+            <section class="tracking-card">
+              <div class="tracking-head">
+                <h4>我司报价一览</h4>
+                <div class="button-row compact-actions">
+                  <button id="exportOurQuotesBtn">导出 Excel</button>
+                  <button id="addOurQuoteBtn">新增报价</button>
+                </div>
+              </div>
+              <div id="ourQuotesTable" class="table-wrap compact-table"></div>
+            </section>
+
+            <section class="tracking-card">
+              <div class="tracking-head">
+                <h4>竞对报价一览</h4>
+                <div class="button-row compact-actions">
+                  <button id="exportCompetitorQuotesBtn">导出 Excel</button>
+                  <button id="addCompetitorQuoteBtn">新增竞对</button>
+                </div>
+              </div>
+              <div id="competitorQuotesTable" class="table-wrap compact-table"></div>
+            </section>
+
+            <section class="tracking-card">
+              <div class="tracking-head">
+                <h4>跟进时间线</h4>
+                <button id="addTimelineBtn">新增记录</button>
+              </div>
+              <div id="timelineTable" class="table-wrap compact-table"></div>
+            </section>
+          </div>
+        </section>
+
         <section id="extractionPanel" class="content-panel hidden">
           <div class="panel-head">
             <div>
               <h3>摘取结果</h3>
-              <p>导出时第一页为摘取结果，第二页为原文依据，原文依据不会再用省略号代替。</p>
+              <p>导出时第一页是摘取结果，第二页是相同模板的原文依据，原文不会再用省略号代替。</p>
             </div>
             <button id="exportExtractionBtn" class="primary">导出摘取 Excel</button>
           </div>
@@ -168,7 +249,7 @@
           <div class="panel-head">
             <div>
               <h3>登记预览</h3>
-              <p>预览和导出都会按最终登记模板的字段顺序填充，年份使用你选择的 sheet。</p>
+              <p>登记导出严格按模板文件中的列顺序填写，年份使用你输入的 sheet 名称。</p>
             </div>
             <button id="exportRegisterBtn" class="primary">导出登记 Excel</button>
           </div>
@@ -179,13 +260,13 @@
           <div class="panel-head">
             <div>
               <h3>AI 对话</h3>
-              <p>只基于当前这份标书解析内容回答，适合追问时间、保证金、资质和评标标准。</p>
+              <p>仅基于当前标书和本次解析结果回答，适合追问投标截止时间、保证金、资格要求和评标标准。</p>
             </div>
-            <span class="pill neutral">仅当前记录</span>
+            <span class="pill neutral">仅当前项目</span>
           </div>
           <div id="chatMessages" class="chat-box"></div>
           <div class="chat-compose">
-            <textarea id="chatInput" rows="3" placeholder="例如：投标截止时间是什么？保证金如何缴纳？"></textarea>
+            <textarea id="chatInput" rows="3" placeholder="例如：本项目的投标截止时间是什么？保证金如何缴纳？"></textarea>
             <button id="sendChatBtn" class="primary">发送</button>
           </div>
         </section>

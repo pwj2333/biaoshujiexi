@@ -11,9 +11,21 @@ const state = {
   documentRegisterRow: {},
   analysis: {},
   matchReview: [],
+  followUp: {},
+  ourQuotes: [],
+  competitorQuotes: [],
+  timeline: [],
   registerMode: 'packages',
   templateMeta: null,
   projects: [],
+  projectStats: {
+    total_projects: 0,
+    awarded_projects: 0,
+    submitted_projects: 0,
+    pending_projects: 0,
+    our_quote_rows: 0,
+    competitor_quote_rows: 0,
+  },
 };
 
 const presets = {
@@ -21,6 +33,50 @@ const presets = {
   openai: { base_url: 'https://api.openai.com/v1', model: 'gpt-4.1-mini' },
   openrouter: { base_url: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4.1-mini' },
 };
+
+const followUpFields = [
+  { key: 'bid_status', label: '投标状态', type: 'select', options: ['待跟进', '准备投标', '已投标', '放弃', '未投标'] },
+  { key: 'award_status', label: '中标状态', type: 'select', options: ['未知', '待定', '已中标', '未中标'] },
+  { key: 'award_date', label: '中标日期' },
+  { key: 'award_company', label: '中标单位' },
+  { key: 'our_award_amount', label: '我司中标价' },
+  { key: 'competitor_award_amount', label: '竞对中标价' },
+  { key: 'information_source', label: '信息来源' },
+  { key: 'register_year', label: '登记年份' },
+  { key: 'tracking_note', label: '跟进备注', type: 'textarea' },
+];
+
+const ourQuoteColumns = [
+  { key: 'package_name', label: '标段/合同包' },
+  { key: 'round_no', label: '轮次', type: 'number' },
+  { key: 'quote_date', label: '报价日期' },
+  { key: 'currency', label: '币种' },
+  { key: 'tax_mode', label: '税率/口径' },
+  { key: 'unit_price', label: '单价' },
+  { key: 'total_price', label: '总价' },
+  { key: 'is_submitted', label: '已投递', type: 'checkbox' },
+  { key: 'is_awarded', label: '中标', type: 'checkbox' },
+  { key: 'remark', label: '备注', type: 'textarea' },
+];
+
+const competitorQuoteColumns = [
+  { key: 'quote_company', label: '竞对公司' },
+  { key: 'package_name', label: '标段/合同包' },
+  { key: 'quote_date', label: '报价日期' },
+  { key: 'currency', label: '币种' },
+  { key: 'unit_price', label: '单价' },
+  { key: 'total_price', label: '总价' },
+  { key: 'ranking', label: '排名' },
+  { key: 'is_awarded', label: '中标', type: 'checkbox' },
+  { key: 'source', label: '来源' },
+  { key: 'remark', label: '备注', type: 'textarea' },
+];
+
+const timelineColumns = [
+  { key: 'date', label: '日期' },
+  { key: 'type', label: '类型', type: 'select', options: ['parse', 'quote', 'award', 'note'] },
+  { key: 'note', label: '内容', type: 'textarea' },
+];
 
 const $ = (id) => document.getElementById(id);
 
@@ -116,6 +172,20 @@ function emptyResult() {
   };
 }
 
+function emptyFollowUp() {
+  return {
+    bid_status: '待跟进',
+    award_status: '未知',
+    award_date: '',
+    award_company: '',
+    our_award_amount: '',
+    competitor_award_amount: '',
+    tracking_note: '',
+    information_source: '',
+    register_year: $('sheetName')?.value.trim() || '',
+  };
+}
+
 function currentRegisterRows() {
   return state.registerMode === 'document' ? [state.documentRegisterRow] : state.registerRows;
 }
@@ -133,12 +203,17 @@ function collectResultPayload() {
 }
 
 function currentProjectPayload() {
+  state.followUp.register_year = $('sheetName').value.trim();
   return {
     title: $('projectTitle').value.trim(),
     source_file_name: state.sourceFileName,
     register_mode: $('registerMode').value,
     sheet_name: $('sheetName').value.trim(),
     result: collectResultPayload(),
+    follow_up: state.followUp,
+    our_quotes: state.ourQuotes,
+    competitor_quotes: state.competitorQuotes,
+    timeline: state.timeline,
   };
 }
 
@@ -156,6 +231,10 @@ function clearCurrentProject() {
   state.documentRegisterRow = result.document_register_row;
   state.analysis = result.analysis;
   state.matchReview = result.match_review;
+  state.followUp = emptyFollowUp();
+  state.ourQuotes = [];
+  state.competitorQuotes = [];
+  state.timeline = [];
   state.registerMode = $('registerMode').value;
   $('projectTitle').value = '';
   $('fileInput').value = '';
@@ -163,6 +242,10 @@ function clearCurrentProject() {
   $('summaryPanel').innerHTML = '';
   $('analysisPanel').innerHTML = '';
   $('reviewPanel').innerHTML = '';
+  $('followUpForm').innerHTML = '';
+  $('ourQuotesTable').innerHTML = '';
+  $('competitorQuotesTable').innerHTML = '';
+  $('timelineTable').innerHTML = '';
   $('extractionTable').innerHTML = '';
   $('registerTable').innerHTML = '';
   $('resultSection').classList.add('hidden');
@@ -182,6 +265,9 @@ function renderSummary(summary) {
     ['服务期限', summary.service_period],
     ['递交方式', summary.submission_method],
     ['识别标的数', state.packageCount || 1],
+    ['投标状态', state.followUp.bid_status || '待跟进'],
+    ['中标状态', state.followUp.award_status || '未知'],
+    ['我司报价条数', state.ourQuotes.length],
   ];
   $('summaryPanel').innerHTML = items
     .map(([label, value]) => `<article class="summary-card"><span>${label}</span><strong>${value || '-'}</strong></article>`)
@@ -240,7 +326,7 @@ function renderExtraction() {
               <tr>
                 <td class="label-col">${field.label}</td>
                 <td><textarea data-type="extraction-value" data-key="${field.key}" rows="4">${value.value || ''}</textarea></td>
-                <td><textarea data-type="extraction-source" data-key="${field.key}" rows="5">${value.source_excerpt || ''}</textarea></td>
+                <td><textarea data-type="extraction-source" data-key="${field.key}" rows="6">${value.source_excerpt || ''}</textarea></td>
               </tr>
             `;
           })
@@ -277,6 +363,95 @@ function renderRegister() {
   `;
 }
 
+function renderFollowUp() {
+  $('followUpForm').innerHTML = followUpFields
+    .map((field) => {
+      const value = state.followUp[field.key] || '';
+      if (field.type === 'select') {
+        return `
+          <label class="field">
+            <span>${field.label}</span>
+            <select data-type="follow-up" data-key="${field.key}">
+              ${field.options
+                .map((option) => `<option value="${option}" ${option === value ? 'selected' : ''}>${option}</option>`)
+                .join('')}
+            </select>
+          </label>
+        `;
+      }
+      if (field.type === 'textarea') {
+        return `
+          <label class="field field-span-2">
+            <span>${field.label}</span>
+            <textarea data-type="follow-up" data-key="${field.key}" rows="4">${value}</textarea>
+          </label>
+        `;
+      }
+      return `
+        <label class="field">
+          <span>${field.label}</span>
+          <input data-type="follow-up" data-key="${field.key}" value="${value}" />
+        </label>
+      `;
+    })
+    .join('');
+}
+
+function tableCellMarkup(kind, rowIndex, column, value) {
+  if (column.type === 'checkbox') {
+    return `<input type="checkbox" data-type="${kind}" data-row="${rowIndex}" data-key="${column.key}" ${value ? 'checked' : ''} />`;
+  }
+  if (column.type === 'select') {
+    return `
+      <select data-type="${kind}" data-row="${rowIndex}" data-key="${column.key}">
+        ${column.options
+          .map((option) => `<option value="${option}" ${option === value ? 'selected' : ''}>${option}</option>`)
+          .join('')}
+      </select>
+    `;
+  }
+  if (column.type === 'textarea') {
+    return `<textarea data-type="${kind}" data-row="${rowIndex}" data-key="${column.key}" rows="3">${value || ''}</textarea>`;
+  }
+  return `<input data-type="${kind}" data-row="${rowIndex}" data-key="${column.key}" value="${value || ''}" ${column.type === 'number' ? 'type="number" min="1"' : ''} />`;
+}
+
+function renderEditableTable(containerId, kind, rows, columns, emptyText) {
+  if (!rows.length) {
+    $(containerId).innerHTML = `<div class="project-empty">${emptyText}</div>`;
+    return;
+  }
+  $(containerId).innerHTML = `
+    <table class="dense-table">
+      <thead>
+        <tr>
+          ${columns.map((column) => `<th>${column.label}</th>`).join('')}
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows
+          .map(
+            (row, rowIndex) => `
+              <tr>
+                ${columns.map((column) => `<td>${tableCellMarkup(kind, rowIndex, column, row[column.key])}</td>`).join('')}
+                <td class="action-col"><button data-action="remove-row" data-kind="${kind}" data-row="${rowIndex}" class="ghost danger">删除</button></td>
+              </tr>
+            `
+          )
+          .join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderTracking() {
+  renderFollowUp();
+  renderEditableTable('ourQuotesTable', 'our-quote', state.ourQuotes, ourQuoteColumns, '还没有录入我司报价');
+  renderEditableTable('competitorQuotesTable', 'competitor-quote', state.competitorQuotes, competitorQuoteColumns, '还没有录入竞对报价');
+  renderEditableTable('timelineTable', 'timeline', state.timeline, timelineColumns, '还没有跟进记录');
+}
+
 function bindDynamicEditors() {
   document.querySelectorAll("textarea[data-type='extraction-value']").forEach((node) => {
     node.oninput = (event) => {
@@ -303,6 +478,43 @@ function bindDynamicEditors() {
       }
     };
   });
+  document.querySelectorAll("[data-type='follow-up']").forEach((node) => {
+    const handler = (event) => {
+      const key = event.target.dataset.key;
+      state.followUp[key] = event.target.value;
+      if (key === 'register_year' && !$('sheetName').value.trim()) {
+        $('sheetName').value = event.target.value;
+      }
+      renderSummary(state.documentSummary);
+    };
+    node.oninput = handler;
+    node.onchange = handler;
+  });
+  document.querySelectorAll("[data-type='our-quote'], [data-type='competitor-quote'], [data-type='timeline']").forEach((node) => {
+    const handler = (event) => {
+      const kind = event.target.dataset.type;
+      const rowIndex = Number(event.target.dataset.row);
+      const key = event.target.dataset.key;
+      const target =
+        kind === 'our-quote' ? state.ourQuotes : kind === 'competitor-quote' ? state.competitorQuotes : state.timeline;
+      target[rowIndex][key] = event.target.type === 'checkbox' ? event.target.checked : event.target.value;
+      renderSummary(state.documentSummary);
+    };
+    node.oninput = handler;
+    node.onchange = handler;
+  });
+  document.querySelectorAll("[data-action='remove-row']").forEach((node) => {
+    node.onclick = () => {
+      const rowIndex = Number(node.dataset.row);
+      const kind = node.dataset.kind;
+      const target =
+        kind === 'our-quote' ? state.ourQuotes : kind === 'competitor-quote' ? state.competitorQuotes : state.timeline;
+      target.splice(rowIndex, 1);
+      renderTracking();
+      bindDynamicEditors();
+      renderSummary(state.documentSummary);
+    };
+  });
 }
 
 function appendChat(role, text) {
@@ -326,6 +538,7 @@ function applyResult(result) {
   renderSummary(result.document_summary);
   renderAnalysis(result.analysis);
   renderReview(result.match_review);
+  renderTracking();
   renderExtraction();
   renderRegister();
   bindDynamicEditors();
@@ -335,6 +548,23 @@ function applyResult(result) {
 
 function renderProjectList() {
   $('projectCount').textContent = `${state.projects.length} 条`;
+  $('historyStats').innerHTML = [
+    ['项目总数', state.projectStats.total_projects],
+    ['已中标', state.projectStats.awarded_projects],
+    ['已投标', state.projectStats.submitted_projects],
+    ['待跟进', state.projectStats.pending_projects],
+    ['我司报价条数', state.projectStats.our_quote_rows],
+    ['竞对报价条数', state.projectStats.competitor_quote_rows],
+  ]
+    .map(
+      ([label, value]) => `
+        <article class="history-stat">
+          <span>${label}</span>
+          <strong>${value || 0}</strong>
+        </article>
+      `
+    )
+    .join('');
   if (!state.projects.length) {
     $('projectList').innerHTML = `<div class="project-empty">没有匹配的历史记录</div>`;
     return;
@@ -343,8 +573,16 @@ function renderProjectList() {
     .map(
       (project) => `
         <button class="project-item ${project.project_id === state.currentProjectId ? 'active' : ''}" data-project-id="${project.project_id}">
-          <strong>${project.title || '未命名项目'}</strong>
+          <div class="project-card-head">
+            <strong>${project.title || '未命名项目'}</strong>
+            <span class="status-chip ${project.award_status === '已中标' ? 'ok' : project.award_status === '未中标' ? 'error' : 'warn'}">${project.award_status || '未知'}</span>
+          </div>
           <span>${project.bid_no || project.project_name || project.source_file_name || '暂无编号'}</span>
+          <div class="project-tags">
+            <span>${project.tenderer || '暂无招标人'}</span>
+            <span>${project.register_year || '未填年份'}</span>
+            <span>${project.bid_status || '待跟进'}</span>
+          </div>
           <small>${(project.updated_at || '').replace('T', ' ')}</small>
         </button>
       `
@@ -362,9 +600,10 @@ function renderProjectList() {
 }
 
 async function loadProjects() {
-  const params = new URLSearchParams({ q: $('projectSearch').value.trim() });
+  const params = new URLSearchParams(currentHistoryFilters());
   const result = await request(`/api/projects?${params.toString()}`);
   state.projects = result.items || [];
+  state.projectStats = result.stats || state.projectStats;
   renderProjectList();
 }
 
@@ -420,6 +659,19 @@ async function testConfig() {
   showToast(`连通成功：${result.message}`);
 }
 
+function ensureDefaultTracking() {
+  if (!state.timeline.length) {
+    state.timeline = [
+      {
+        id: crypto.randomUUID ? crypto.randomUUID().slice(0, 12) : String(Date.now()),
+        date: new Date().toISOString().slice(0, 10),
+        type: 'parse',
+        note: '完成标书解析',
+      },
+    ];
+  }
+}
+
 async function parseFile() {
   const file = $('fileInput').files[0];
   if (!file) throw new Error('请先选择标书文件');
@@ -431,6 +683,12 @@ async function parseFile() {
   const result = await request('/api/parse', { method: 'POST', body: formData });
   state.sessionId = result.session_id;
   state.sourceFileName = result.source_file_name || file.name;
+  state.followUp = emptyFollowUp();
+  state.followUp.register_year = $('sheetName').value.trim();
+  state.ourQuotes = [];
+  state.competitorQuotes = [];
+  state.timeline = [];
+  ensureDefaultTracking();
   if (!$('projectTitle').value.trim()) {
     $('projectTitle').value = result.document_summary.project_name || file.name;
   }
@@ -474,14 +732,18 @@ async function loadProject(projectId) {
   state.sessionId = project.session_id;
   state.sourceFileName = project.source_file_name || '';
   state.registerMode = project.register_mode || 'packages';
+  state.followUp = project.follow_up || emptyFollowUp();
+  state.ourQuotes = project.our_quotes || [];
+  state.competitorQuotes = project.competitor_quotes || [];
+  state.timeline = project.timeline || [];
   $('registerMode').value = state.registerMode;
-  $('sheetName').value = project.sheet_name || $('sheetName').value;
+  $('sheetName').value = project.sheet_name || state.followUp.register_year || $('sheetName').value;
   $('projectTitle').value = project.title || '';
   $('chatMessages').innerHTML = '';
   applyResult(project.result);
-  $('historyMenu').open = true;
   setStatus('fileStatus', '已加载历史记录', 'ok');
   renderProjectList();
+  switchPanel('historyPanel');
 }
 
 async function deleteCurrentProject() {
@@ -520,26 +782,58 @@ async function downloadFile(url, payload, filename) {
   URL.revokeObjectURL(link.href);
 }
 
+function currentHistoryFilters() {
+  return {
+    q: $('projectSearch').value.trim(),
+    year: $('historyYear').value.trim(),
+    bid_status: $('historyBidStatus').value,
+    award_status: $('historyAwardStatus').value,
+  };
+}
+
+function newQuote(defaultCompany = '') {
+  return {
+    id: crypto.randomUUID ? crypto.randomUUID().slice(0, 12) : String(Date.now()),
+    package_name: '',
+    round_no: 1,
+    quote_date: '',
+    quote_company: defaultCompany,
+    currency: 'CNY',
+    tax_mode: '',
+    unit_price: '',
+    total_price: '',
+    ranking: '',
+    is_submitted: false,
+    is_awarded: false,
+    source: '',
+    remark: '',
+  };
+}
+
+function newTimeline() {
+  return {
+    id: crypto.randomUUID ? crypto.randomUUID().slice(0, 12) : String(Date.now()),
+    date: new Date().toISOString().slice(0, 10),
+    type: 'note',
+    note: '',
+  };
+}
+
 function bindEvents() {
   document.querySelectorAll('.nav-link').forEach((node) => {
     node.onclick = () => switchPanel(node.dataset.target);
   });
 
-  $('historyMenu').addEventListener('toggle', () => {
-    const toggle = document.querySelector('.history-toggle');
-    if (toggle) {
-      toggle.textContent = $('historyMenu').open ? '收起' : '展开';
-    }
+  ['projectSearch', 'historyYear', 'historyBidStatus', 'historyAwardStatus'].forEach((id) => {
+    $(id).oninput = async () => {
+      try {
+        await loadProjects();
+      } catch (error) {
+        showToast(error.message, true);
+      }
+    };
+    $(id).onchange = $(id).oninput;
   });
-
-  $('projectSearch').oninput = async () => {
-    try {
-      $('historyMenu').open = true;
-      await loadProjects();
-    } catch (error) {
-      showToast(error.message, true);
-    }
-  };
 
   $('configPreset').onchange = (event) => applyPreset(event.target.value);
 
@@ -592,6 +886,30 @@ function bindEvents() {
     }
   };
 
+  $('sheetName').oninput = () => {
+    state.followUp.register_year = $('sheetName').value.trim();
+  };
+
+  $('addOurQuoteBtn').onclick = () => {
+    state.ourQuotes.push(newQuote('我司'));
+    renderTracking();
+    bindDynamicEditors();
+    renderSummary(state.documentSummary);
+  };
+
+  $('addCompetitorQuoteBtn').onclick = () => {
+    state.competitorQuotes.push(newQuote(''));
+    renderTracking();
+    bindDynamicEditors();
+    renderSummary(state.documentSummary);
+  };
+
+  $('addTimelineBtn').onclick = () => {
+    state.timeline.push(newTimeline());
+    renderTracking();
+    bindDynamicEditors();
+  };
+
   $('sendChatBtn').onclick = async () => {
     const question = $('chatInput').value.trim();
     if (!question) return;
@@ -614,7 +932,18 @@ function bindEvents() {
 
   $('exportOverviewBtn').onclick = async () => {
     try {
-      await downloadFile('/api/export/overview', { result: collectResultPayload() }, '解析总览.md');
+      await downloadFile(
+        '/api/export/overview',
+        {
+          title: $('projectTitle').value.trim(),
+          result: collectResultPayload(),
+          follow_up: state.followUp,
+          our_quotes: state.ourQuotes,
+          competitor_quotes: state.competitorQuotes,
+          timeline: state.timeline,
+        },
+        '解析总览.xlsx'
+      );
     } catch (error) {
       showToast(error.message, true);
     }
@@ -631,6 +960,46 @@ function bindEvents() {
   $('exportRegisterBtn').onclick = async () => {
     try {
       await downloadFile('/api/export/register', { rows: currentRegisterRows(), sheet_name: $('sheetName').value }, '招标登记.xlsx');
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  };
+
+  $('exportOurQuotesBtn').onclick = async () => {
+    try {
+      await downloadFile(
+        '/api/export/our-quotes',
+        {
+          title: $('projectTitle').value.trim(),
+          follow_up: state.followUp,
+          rows: state.ourQuotes,
+        },
+        '我司报价一览表.xlsx'
+      );
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  };
+
+  $('exportCompetitorQuotesBtn').onclick = async () => {
+    try {
+      await downloadFile(
+        '/api/export/competitor-quotes',
+        {
+          title: $('projectTitle').value.trim(),
+          follow_up: state.followUp,
+          rows: state.competitorQuotes,
+        },
+        '竞对报价对比.xlsx'
+      );
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  };
+
+  $('exportLedgerBtn').onclick = async () => {
+    try {
+      await downloadFile('/api/export/ledger', currentHistoryFilters(), '历史台账汇总.xlsx');
     } catch (error) {
       showToast(error.message, true);
     }

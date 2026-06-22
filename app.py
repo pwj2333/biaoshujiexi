@@ -3,20 +3,22 @@ from __future__ import annotations
 import io
 import json
 import re
+import subprocess
 import uuid
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.styles import Alignment, Border, Font, Side
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -82,6 +84,9 @@ DEFAULT_CONFIG = {
 
 STATUS_LABELS = {'ok', '已明确满足', '需人工确认', '疑似风险/否决项'}
 ELLIPSIS_MARKERS = ('...', '…', '⋯', '。。。')
+BID_STATUS_OPTIONS = ('待跟进', '准备投标', '已投标', '放弃', '未投标')
+AWARD_STATUS_OPTIONS = ('未知', '待定', '已中标', '未中标')
+TIMELINE_TYPE_OPTIONS = ('parse', 'quote', 'award', 'note')
 
 PARSER_SYSTEM_PROMPT = """
 你是航运招投标标书解析助手，只能输出一个 JSON 对象，不能输出 Markdown 或额外解释。
@@ -225,7 +230,25 @@ class ExportRegisterPayload(BaseModel):
 
 
 class ExportOverviewPayload(BaseModel):
+    title: str = ''
     result: dict[str, Any]
+    follow_up: dict[str, Any] = Field(default_factory=dict)
+    our_quotes: list[dict[str, Any]] = Field(default_factory=list)
+    competitor_quotes: list[dict[str, Any]] = Field(default_factory=list)
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ExportQuotePayload(BaseModel):
+    title: str = ''
+    follow_up: dict[str, Any] = Field(default_factory=dict)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ExportLedgerPayload(BaseModel):
+    q: str = ''
+    year: str = ''
+    award_status: str = ''
+    bid_status: str = ''
 
 
 class ProjectPayload(BaseModel):
@@ -234,6 +257,10 @@ class ProjectPayload(BaseModel):
     register_mode: str = 'packages'
     sheet_name: str = ''
     result: dict[str, Any] = Field(default_factory=dict)
+    follow_up: dict[str, Any] = Field(default_factory=dict)
+    our_quotes: list[dict[str, Any]] = Field(default_factory=list)
+    competitor_quotes: list[dict[str, Any]] = Field(default_factory=list)
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def cleanup_sessions() -> None:
@@ -422,35 +449,41 @@ def call_chat_completion(
         'Content-Type': 'application/json',
     }
     url = normalize_base_url(config['base_url'])
-    timeout = httpx.Timeout(connect=30.0, read=180.0, write=60.0, pool=30.0)
-    last_error: Exception | None = None
+    timeout = httpx.Timeout(connect=30.0, read=300.0, write=60.0, pool=30.0)
     response = None
-    for attempt in range(2):
+    try:
+        response = httpx.post(url, json=payload, headers=headers, timeout=timeout)
+    except httpx.ConnectTimeout as exc:
+        # ponytail: 仅对连接阶段重试一次；读超时不重试，避免模型已成功执行却重复扣费。
         try:
             response = httpx.post(url, json=payload, headers=headers, timeout=timeout)
-            break
-        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
-            last_error = exc
-            if attempt == 0:
-                continue
+        except httpx.ConnectTimeout as retry_exc:
             raise HTTPException(
                 status_code=504,
-                detail=f'AI 接口超时：{type(exc).__name__}: {exc}',
-            ) from exc
-        except httpx.TimeoutException as exc:
-            raise HTTPException(
-                status_code=504,
-                detail=f'AI 接口超时：{type(exc).__name__}: {exc}',
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f'AI 接口调用失败：{type(exc).__name__}: {exc}',
-            ) from exc
+                detail=f'AI 接口连接超时：{type(retry_exc).__name__}: {retry_exc}',
+            ) from retry_exc
+    except (httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f'AI 接口响应超时：{type(exc).__name__}: {exc}。'
+                '请求可能已到达模型侧并正在处理，请避免立即重复提交，可稍后重试或缩短解析内容。'
+            ),
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=504,
+            detail=f'AI 接口超时：{type(exc).__name__}: {exc}',
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f'AI 接口调用失败：{type(exc).__name__}: {exc}',
+        ) from exc
     if response is None:
         raise HTTPException(
             status_code=504,
-            detail=f'AI 接口超时：{type(last_error).__name__}: {last_error}' if last_error else 'AI 接口超时，请稍后重试。',
+            detail='AI 接口超时，请稍后重试。',
         )
     if response.status_code == 401:
         raise HTTPException(status_code=401, detail='AI 接口鉴权失败，请检查 API Key。')
@@ -482,11 +515,17 @@ def extract_pdf_text(file_path: Path) -> str:
 
 
 def extract_docx_text(file_path: Path) -> str:
-    with ZipFile(file_path) as archive:
-        try:
-            xml_bytes = archive.read('word/document.xml')
-        except KeyError as exc:
-            raise HTTPException(status_code=400, detail='DOCX 结构无效，无法读取正文。') from exc
+    try:
+        with ZipFile(file_path) as archive:
+            try:
+                xml_bytes = archive.read('word/document.xml')
+            except KeyError as exc:
+                raise HTTPException(status_code=400, detail='DOCX 结构无效，无法读取正文。') from exc
+    except BadZipFile as exc:
+        raise HTTPException(
+            status_code=400,
+            detail='上传的 DOCX 文件格式无效，当前文件不是可解析的 Office 文档，请重新导出为标准 DOCX 后再上传。',
+        ) from exc
     root = ET.fromstring(xml_bytes)
     namespace = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
     parts: list[str] = []
@@ -498,13 +537,126 @@ def extract_docx_text(file_path: Path) -> str:
     return clean_text('\n'.join(parts))
 
 
+def extract_xlsx_text(file_path: Path) -> str:
+    try:
+        workbook = load_workbook(file_path, data_only=True)
+    except (BadZipFile, InvalidFileException, OSError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail='上传的 Excel 文件格式无效，当前文件不是可解析的标准 Excel 文档，请重新保存为 xlsx 后再上传。',
+        ) from exc
+    parts: list[str] = []
+    for sheet in workbook.worksheets:
+        sheet_lines: list[str] = []
+        for row in sheet.iter_rows(values_only=True):
+            cells = [compact_text(cell) for cell in row if compact_text(cell)]
+            if cells:
+                sheet_lines.append(' | '.join(cells))
+        if sheet_lines:
+            parts.append(f'工作表：{sheet.title}')
+            parts.extend(sheet_lines)
+    workbook.close()
+    return clean_text('\n'.join(parts))
+
+
+def extract_with_office_com(file_path: Path, kind: str) -> str:
+    escaped = str(file_path).replace("'", "''")
+    if kind == 'word':
+        script = rf"""
+$ErrorActionPreference = 'Stop'
+$path = '{escaped}'
+$word = $null
+$doc = $null
+try {{
+  $word = New-Object -ComObject Word.Application
+  $word.Visible = $false
+  $doc = $word.Documents.Open($path, $false, $true)
+  $text = $doc.Content.Text
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  Write-Output $text
+}} finally {{
+  if ($doc) {{ $doc.Close() }}
+  if ($word) {{ $word.Quit() }}
+}}
+""".strip()
+    else:
+        script = rf"""
+$ErrorActionPreference = 'Stop'
+$path = '{escaped}'
+$excel = $null
+$workbook = $null
+try {{
+  $excel = New-Object -ComObject Excel.Application
+  $excel.Visible = $false
+  $excel.DisplayAlerts = $false
+  $workbook = $excel.Workbooks.Open($path, 0, $true)
+  $lines = New-Object System.Collections.Generic.List[string]
+  foreach ($sheet in $workbook.Worksheets) {{
+    $lines.Add("工作表：$($sheet.Name)")
+    $range = $sheet.UsedRange
+    $rowCount = $range.Rows.Count
+    $colCount = $range.Columns.Count
+    for ($r = 1; $r -le $rowCount; $r++) {{
+      $cells = New-Object System.Collections.Generic.List[string]
+      for ($c = 1; $c -le $colCount; $c++) {{
+        $value = $range.Item($r, $c).Text
+        if ($value) {{ $cells.Add($value.Trim()) }}
+      }}
+      if ($cells.Count -gt 0) {{ $lines.Add(($cells -join ' | ')) }}
+    }}
+  }}
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  Write-Output ($lines -join [Environment]::NewLine)
+}} finally {{
+  if ($workbook) {{ $workbook.Close($false) }}
+  if ($excel) {{ $excel.Quit() }}
+}}
+""".strip()
+    try:
+        completed = subprocess.run(
+            ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            timeout=120,
+            check=False,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail='当前环境无法调用 Office 解析该文件，请优先上传 PDF、DOCX 或 XLSX。',
+        ) from exc
+    if completed.returncode != 0:
+        raise HTTPException(
+            status_code=400,
+            detail='当前环境无法解析该 Office 文件。若本机未安装 Word/Excel，请先另存为 DOCX/XLSX/PDF 后再上传。',
+        )
+    return clean_text(completed.stdout)
+
+
+def extract_doc_text(file_path: Path) -> str:
+    return extract_with_office_com(file_path, 'word')
+
+
+def extract_xls_text(file_path: Path) -> str:
+    return extract_with_office_com(file_path, 'excel')
+
+
 def extract_document_text(file_path: Path, suffix: str) -> str:
     if suffix == '.pdf':
         return extract_pdf_text(file_path)
     if suffix == '.docx':
         # ponytail: 只读 document.xml 正文，不处理页眉页脚和图片；要更完整再接专门的 docx 解析器。
         return extract_docx_text(file_path)
-    raise HTTPException(status_code=400, detail='当前只支持 PDF 和 DOCX。')
+    if suffix == '.doc':
+        # ponytail: 旧版 doc 直接走本机 Word COM；无 Office 时引导另存为 docx/pdf。
+        return extract_doc_text(file_path)
+    if suffix == '.xlsx':
+        return extract_xlsx_text(file_path)
+    if suffix == '.xls':
+        # ponytail: 旧版 xls 直接走本机 Excel COM；无 Office 时引导另存为 xlsx/pdf。
+        return extract_xls_text(file_path)
+    raise HTTPException(status_code=400, detail='当前只支持 PDF、DOC、DOCX、XLS、XLSX。')
 
 
 def compact_text(value: Any) -> str:
@@ -623,6 +775,78 @@ def normalize_match_review(raw: Any) -> list[dict[str, str]]:
     return normalized
 
 
+def normalize_follow_up(raw: Any, *, sheet_name: str = '') -> dict[str, str]:
+    source = raw if isinstance(raw, dict) else {}
+    bid_status = compact_text(source.get('bid_status') or '待跟进')
+    award_status = compact_text(source.get('award_status') or '未知')
+    if bid_status not in BID_STATUS_OPTIONS:
+        bid_status = '待跟进'
+    if award_status not in AWARD_STATUS_OPTIONS:
+        award_status = '未知'
+    return {
+        'bid_status': bid_status,
+        'award_status': award_status,
+        'award_date': compact_text(source.get('award_date')),
+        'award_company': compact_text(source.get('award_company')),
+        'our_award_amount': compact_text(source.get('our_award_amount')),
+        'competitor_award_amount': compact_text(source.get('competitor_award_amount')),
+        'tracking_note': compact_paragraph(source.get('tracking_note')),
+        'information_source': compact_text(source.get('information_source')),
+        'register_year': compact_text(source.get('register_year') or sheet_name),
+    }
+
+
+def normalize_quote_row(raw: Any, *, default_company: str = '') -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    try:
+        round_no = max(1, int(source.get('round_no') or 1))
+    except (TypeError, ValueError):
+        round_no = 1
+    return {
+        'id': compact_text(source.get('id') or uuid.uuid4().hex[:12]),
+        'package_name': compact_text(source.get('package_name')),
+        'round_no': round_no,
+        'quote_date': compact_text(source.get('quote_date')),
+        'quote_company': compact_text(source.get('quote_company') or default_company),
+        'currency': compact_text(source.get('currency') or 'CNY'),
+        'tax_mode': compact_text(source.get('tax_mode')),
+        'unit_price': compact_text(source.get('unit_price')),
+        'total_price': compact_text(source.get('total_price')),
+        'ranking': compact_text(source.get('ranking')),
+        'is_submitted': bool(source.get('is_submitted')),
+        'is_awarded': bool(source.get('is_awarded')),
+        'source': compact_text(source.get('source')),
+        'remark': compact_paragraph(source.get('remark')),
+    }
+
+
+def normalize_quote_rows(raw: Any, *, default_company: str = '') -> list[dict[str, Any]]:
+    rows = raw if isinstance(raw, list) else []
+    return [normalize_quote_row(row, default_company=default_company) for row in rows]
+
+
+def normalize_timeline_rows(raw: Any) -> list[dict[str, str]]:
+    rows = raw if isinstance(raw, list) else []
+    normalized: list[dict[str, str]] = []
+    for row in rows:
+        source = row if isinstance(row, dict) else {}
+        item_type = compact_text(source.get('type') or 'note')
+        if item_type not in TIMELINE_TYPE_OPTIONS:
+            item_type = 'note'
+        note = compact_paragraph(source.get('note'))
+        if not note:
+            continue
+        normalized.append(
+            {
+                'id': compact_text(source.get('id') or uuid.uuid4().hex[:12]),
+                'date': compact_text(source.get('date') or datetime.now().strftime('%Y-%m-%d')),
+                'type': item_type,
+                'note': note,
+            }
+        )
+    return normalized
+
+
 def merge_register_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {column['key']: '' for column in REGISTER_COLUMNS}
@@ -658,6 +882,20 @@ def normalize_result_payload(data: dict[str, Any]) -> dict[str, Any]:
         'document_text_full': document_text_full,
         'document_text_excerpt': document_text_full[:12000],
     }
+
+
+def build_auto_timeline(result: dict[str, Any], source_file_name: str = '') -> list[dict[str, str]]:
+    note = '完成标书解析并生成摘取结果'
+    if source_file_name:
+        note = f'完成标书解析：{source_file_name}'
+    return [
+        {
+            'id': uuid.uuid4().hex[:12],
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'type': 'parse',
+            'note': note,
+        }
+    ]
 
 
 def build_parser_prompt(document_text: str) -> str:
@@ -708,19 +946,27 @@ def parse_ai_document(document_text: str, config: dict[str, Any]) -> dict[str, A
     raw = None
     current_content = content
     last_error_detail = 'AI 返回的 JSON 无法解析。'
-    for _ in range(4):
+    for repair_round in range(3):
         try:
             raw = parse_json_text(current_content)
             break
         except HTTPException as exc:
             last_error_detail = str(exc.detail)
+            if repair_round == 2:
+                break
             repair_prompt = build_json_repair_prompt(current_content, last_error_detail)
-            current_content = call_chat_completion(
-                config,
-                system_prompt=JSON_REPAIR_SYSTEM_PROMPT,
-                user_prompt=repair_prompt,
-                temperature=0,
-            )
+            try:
+                current_content = call_chat_completion(
+                    config,
+                    system_prompt=JSON_REPAIR_SYSTEM_PROMPT,
+                    user_prompt=repair_prompt,
+                    temperature=0,
+                )
+            except HTTPException as repair_exc:
+                raise HTTPException(
+                    status_code=repair_exc.status_code,
+                    detail=f'AI 首轮已返回，但第 {repair_round + 1} 轮 JSON 修复失败：{repair_exc.detail}',
+                ) from repair_exc
     if raw is None:
         raise HTTPException(status_code=502, detail=f'AI 连续 3 轮 JSON 修复仍失败：{last_error_detail}')
     result = normalize_result_payload(raw)
@@ -823,6 +1069,7 @@ def project_path(project_id: str) -> Path:
 
 def project_meta(project: dict[str, Any]) -> dict[str, Any]:
     summary = project.get('result', {}).get('document_summary', {})
+    follow_up = project.get('follow_up', {})
     return {
         'project_id': project['project_id'],
         'title': project.get('title', ''),
@@ -833,6 +1080,12 @@ def project_meta(project: dict[str, Any]) -> dict[str, Any]:
         'updated_at': project.get('updated_at', ''),
         'project_name': summary.get('project_name', ''),
         'bid_no': summary.get('bid_no', ''),
+        'tenderer': summary.get('tenderer', ''),
+        'register_year': follow_up.get('register_year', '') or project.get('sheet_name', ''),
+        'bid_status': follow_up.get('bid_status', '待跟进'),
+        'award_status': follow_up.get('award_status', '未知'),
+        'our_quote_count': len(project.get('our_quotes', [])),
+        'competitor_quote_count': len(project.get('competitor_quotes', [])),
     }
 
 
@@ -842,15 +1095,27 @@ def read_project_file(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     project_id = str(raw.get('project_id') or path.stem)
+    sheet_name = compact_text(raw.get('sheet_name'))
+    result = normalize_result_payload(raw.get('result') or {})
+    follow_up = normalize_follow_up(raw.get('follow_up'), sheet_name=sheet_name)
+    our_quotes = normalize_quote_rows(raw.get('our_quotes'), default_company='我司')
+    competitor_quotes = normalize_quote_rows(raw.get('competitor_quotes'))
+    timeline = normalize_timeline_rows(raw.get('timeline'))
+    if not timeline and result.get('document_summary', {}).get('project_name'):
+        timeline = build_auto_timeline(result, compact_text(raw.get('source_file_name')))
     return {
         'project_id': project_id,
         'title': compact_text(raw.get('title')),
         'source_file_name': compact_text(raw.get('source_file_name')),
         'register_mode': compact_text(raw.get('register_mode') or 'packages') or 'packages',
-        'sheet_name': compact_text(raw.get('sheet_name')),
+        'sheet_name': sheet_name,
         'created_at': compact_text(raw.get('created_at')),
         'updated_at': compact_text(raw.get('updated_at')),
-        'result': normalize_result_payload(raw.get('result') or {}),
+        'result': result,
+        'follow_up': follow_up,
+        'our_quotes': our_quotes,
+        'competitor_quotes': competitor_quotes,
+        'timeline': timeline,
     }
 
 
@@ -868,15 +1133,26 @@ def save_project(project_id: str, payload: ProjectPayload, *, created_at: str | 
     now = datetime.now().isoformat(timespec='seconds')
     result = normalize_result_payload(payload.result)
     title = compact_text(payload.title) or result['document_summary']['project_name'] or '未命名项目'
+    sheet_name = compact_text(payload.sheet_name)
+    follow_up = normalize_follow_up(payload.follow_up, sheet_name=sheet_name)
+    our_quotes = normalize_quote_rows(payload.our_quotes, default_company='我司')
+    competitor_quotes = normalize_quote_rows(payload.competitor_quotes)
+    timeline = normalize_timeline_rows(payload.timeline)
+    if not timeline and result.get('document_summary', {}).get('project_name'):
+        timeline = build_auto_timeline(result, compact_text(payload.source_file_name))
     project = {
         'project_id': project_id,
         'title': title,
         'source_file_name': compact_text(payload.source_file_name),
         'register_mode': payload.register_mode if payload.register_mode in {'packages', 'document'} else 'packages',
-        'sheet_name': compact_text(payload.sheet_name),
+        'sheet_name': sheet_name,
         'created_at': created_at or now,
         'updated_at': now,
         'result': result,
+        'follow_up': follow_up,
+        'our_quotes': our_quotes,
+        'competitor_quotes': competitor_quotes,
+        'timeline': timeline,
     }
     project_path(project_id).write_text(
         json.dumps(project, ensure_ascii=False, indent=2),
@@ -885,11 +1161,23 @@ def save_project(project_id: str, payload: ProjectPayload, *, created_at: str | 
     return project
 
 
-def build_overview_text(result: dict[str, Any]) -> str:
+def build_overview_text(
+    title: str,
+    result: dict[str, Any],
+    *,
+    follow_up: dict[str, Any] | None = None,
+    our_quotes: list[dict[str, Any]] | None = None,
+    competitor_quotes: list[dict[str, Any]] | None = None,
+    timeline: list[dict[str, Any]] | None = None,
+) -> str:
     summary = result['document_summary']
     analysis = result['analysis']
     rows = result['register_rows']
     review = result['match_review']
+    follow_up = normalize_follow_up(follow_up or {})
+    our_quotes = normalize_quote_rows(our_quotes or [], default_company='我司')
+    competitor_quotes = normalize_quote_rows(competitor_quotes or [])
+    timeline = normalize_timeline_rows(timeline or [])
 
     def block(title: str, items: list[str]) -> str:
         lines = [item for item in items if item]
@@ -897,6 +1185,8 @@ def build_overview_text(result: dict[str, Any]) -> str:
 
     sections = [
         '# 标书解析总览',
+        '',
+        f"归档标题：{title or summary['project_name'] or '未命名项目'}",
         '',
         '## 核心信息',
         f"项目名称：{summary['project_name'] or '未识别'}",
@@ -910,6 +1200,16 @@ def build_overview_text(result: dict[str, Any]) -> str:
         '',
         '## AI 解析',
         analysis['summary'] or '无',
+        '',
+        '## 跟踪结果',
+        f"投标状态：{follow_up['bid_status'] or '待跟进'}",
+        f"中标状态：{follow_up['award_status'] or '未知'}",
+        f"中标日期：{follow_up['award_date'] or '-'}",
+        f"中标单位：{follow_up['award_company'] or '-'}",
+        f"我司中标价：{follow_up['our_award_amount'] or '-'}",
+        f"竞对中标价：{follow_up['competitor_award_amount'] or '-'}",
+        f"信息来源：{follow_up['information_source'] or '-'}",
+        f"跟进备注：{follow_up['tracking_note'] or '-'}",
         '',
         block('## 资格文件清单', analysis['qualification_files']),
         '',
@@ -937,6 +1237,52 @@ def build_overview_text(result: dict[str, Any]) -> str:
     else:
         sections.append('无')
 
+    sections.extend(['', '## 我司报价一览'])
+    if our_quotes:
+        for index, row in enumerate(our_quotes, start=1):
+            sections.extend(
+                [
+                    f"{index}. 标段：{row.get('package_name') or '-'}",
+                    f"   轮次：第 {row.get('round_no') or 1} 轮",
+                    f"   报价日期：{row.get('quote_date') or '-'}",
+                    f"   币种：{row.get('currency') or 'CNY'}",
+                    f"   单价：{row.get('unit_price') or '-'}",
+                    f"   总价：{row.get('total_price') or '-'}",
+                    f"   是否已投：{'是' if row.get('is_submitted') else '否'}",
+                    f"   是否中标：{'是' if row.get('is_awarded') else '否'}",
+                    f"   备注：{row.get('remark') or '-'}",
+                ]
+            )
+    else:
+        sections.append('- 无')
+
+    sections.extend(['', '## 竞对报价一览'])
+    if competitor_quotes:
+        for index, row in enumerate(competitor_quotes, start=1):
+            sections.extend(
+                [
+                    f"{index}. 公司：{row.get('quote_company') or '-'}",
+                    f"   标段：{row.get('package_name') or '-'}",
+                    f"   报价日期：{row.get('quote_date') or '-'}",
+                    f"   币种：{row.get('currency') or 'CNY'}",
+                    f"   单价：{row.get('unit_price') or '-'}",
+                    f"   总价：{row.get('total_price') or '-'}",
+                    f"   排名：{row.get('ranking') or '-'}",
+                    f"   是否中标：{'是' if row.get('is_awarded') else '否'}",
+                    f"   来源：{row.get('source') or '-'}",
+                    f"   备注：{row.get('remark') or '-'}",
+                ]
+            )
+    else:
+        sections.append('- 无')
+
+    sections.extend(['', '## 跟进时间线'])
+    if timeline:
+        for item in timeline:
+            sections.append(f"- [{item.get('date') or '-'}] {item.get('type') or 'note'}：{item.get('note') or '-'}")
+    else:
+        sections.append('- 无')
+
     sections.extend(['', '## 匹配复核'])
     if review:
         for item in review:
@@ -957,6 +1303,344 @@ def build_overview_text(result: dict[str, Any]) -> str:
 def clear_sheet_rows(sheet: Any, start_row: int) -> None:
     if sheet.max_row >= start_row:
         sheet.delete_rows(start_row, sheet.max_row - start_row + 1)
+
+
+def autosize_sheet(sheet: Any, widths: dict[int, int]) -> None:
+    for index, width in widths.items():
+        sheet.column_dimensions[chr(64 + index)].width = width
+
+
+def apply_plain_table_style(sheet: Any, row_count: int, col_count: int) -> None:
+    thin = Side(style='thin', color='000000')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_font = Font(bold=True)
+    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    for row_index in range(1, row_count + 1):
+        for col_index in range(1, col_count + 1):
+            cell = sheet.cell(row_index, col_index)
+            cell.border = border
+            cell.alignment = center if row_index <= 2 or col_index <= 2 else Alignment(vertical='top', wrap_text=True)
+            if row_index in {1, 2, 4}:
+                cell.font = header_font
+
+
+def build_quote_workbook(
+    *,
+    title: str,
+    follow_up: dict[str, Any],
+    rows: list[dict[str, Any]],
+    is_competitor: bool,
+) -> BytesIO:
+    follow_up = normalize_follow_up(follow_up or {})
+    normalized_rows = normalize_quote_rows(rows or [], default_company='' if is_competitor else '我司')
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = '报价一览'
+    sheet['A1'] = '竞对报价对比' if is_competitor else '我司报价一览表'
+    sheet['A2'] = '项目名称'
+    sheet['B2'] = title or '未命名项目'
+    sheet['C2'] = '投标状态'
+    sheet['D2'] = follow_up.get('bid_status', '待跟进')
+    sheet['E2'] = '中标状态'
+    sheet['F2'] = follow_up.get('award_status', '未知')
+    sheet['G2'] = '我司中标价' if not is_competitor else '竞对中标价'
+    sheet['H2'] = follow_up.get('our_award_amount' if not is_competitor else 'competitor_award_amount', '')
+
+    headers = (
+        ['序号', '标段/合同包', '轮次', '报价日期', '报价主体', '币种', '税率/口径', '单价', '总价', '已投递', '是否中标', '备注']
+        if not is_competitor
+        else ['序号', '竞对公司', '标段/合同包', '报价日期', '币种', '单价', '总价', '排名', '是否中标', '来源', '备注']
+    )
+    start_row = 4
+    for index, header in enumerate(headers, start=1):
+        sheet.cell(start_row, index, header)
+
+    for offset, row in enumerate(normalized_rows, start=1):
+        row_index = start_row + offset
+        if not is_competitor:
+            values = [
+                offset,
+                row.get('package_name', ''),
+                row.get('round_no', 1),
+                row.get('quote_date', ''),
+                row.get('quote_company', '我司'),
+                row.get('currency', 'CNY'),
+                row.get('tax_mode', ''),
+                row.get('unit_price', ''),
+                row.get('total_price', ''),
+                '是' if row.get('is_submitted') else '否',
+                '是' if row.get('is_awarded') else '否',
+                row.get('remark', ''),
+            ]
+        else:
+            values = [
+                offset,
+                row.get('quote_company', ''),
+                row.get('package_name', ''),
+                row.get('quote_date', ''),
+                row.get('currency', 'CNY'),
+                row.get('unit_price', ''),
+                row.get('total_price', ''),
+                row.get('ranking', ''),
+                '是' if row.get('is_awarded') else '否',
+                row.get('source', ''),
+                row.get('remark', ''),
+            ]
+        for col_index, value in enumerate(values, start=1):
+            sheet.cell(row_index, col_index, value)
+
+    final_row = max(start_row + len(normalized_rows), start_row)
+    apply_plain_table_style(sheet, final_row, len(headers))
+    autosize_sheet(
+        sheet,
+        {
+            1: 8,
+            2: 24,
+            3: 18,
+            4: 16,
+            5: 18,
+            6: 12,
+            7: 14,
+            8: 14,
+            9: 14,
+            10: 14,
+            11: 26,
+            12: 24,
+        },
+    )
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
+def collect_project_items(
+    *,
+    q: str = '',
+    year: str = '',
+    award_status: str = '',
+    bid_status: str = '',
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    keyword = q.strip().lower()
+    year = compact_text(year)
+    award_status = compact_text(award_status)
+    bid_status = compact_text(bid_status)
+    items: list[dict[str, Any]] = []
+    for path in PROJECTS_DIR.glob('*.json'):
+        project = read_project_file(path)
+        if not project:
+            continue
+        meta = project_meta(project)
+        text = ' '.join(
+            [
+                meta.get('title', ''),
+                meta.get('project_name', ''),
+                meta.get('bid_no', ''),
+                meta.get('tenderer', ''),
+                meta.get('source_file_name', ''),
+            ]
+        ).lower()
+        if keyword and keyword not in text:
+            continue
+        if year and meta.get('register_year', '') != year:
+            continue
+        if award_status and meta.get('award_status', '') != award_status:
+            continue
+        if bid_status and meta.get('bid_status', '') != bid_status:
+            continue
+        items.append(meta)
+    items.sort(key=lambda item: item.get('updated_at', ''), reverse=True)
+    stats = {
+        'total_projects': len(items),
+        'awarded_projects': sum(1 for item in items if item.get('award_status') == '已中标'),
+        'submitted_projects': sum(1 for item in items if item.get('bid_status') == '已投标'),
+        'pending_projects': sum(1 for item in items if item.get('bid_status') == '待跟进'),
+        'our_quote_rows': sum(int(item.get('our_quote_count') or 0) for item in items),
+        'competitor_quote_rows': sum(int(item.get('competitor_quote_count') or 0) for item in items),
+    }
+    return items, stats
+
+
+def build_ledger_workbook(
+    *,
+    q: str = '',
+    year: str = '',
+    award_status: str = '',
+    bid_status: str = '',
+) -> BytesIO:
+    items, stats = collect_project_items(q=q, year=year, award_status=award_status, bid_status=bid_status)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = '历史台账'
+    sheet['A1'] = '历史台账汇总'
+    sheet['A2'] = '筛选关键词'
+    sheet['B2'] = compact_text(q) or '全部'
+    sheet['C2'] = '登记年份'
+    sheet['D2'] = compact_text(year) or '全部'
+    sheet['E2'] = '投标状态'
+    sheet['F2'] = compact_text(bid_status) or '全部'
+    sheet['G2'] = '中标状态'
+    sheet['H2'] = compact_text(award_status) or '全部'
+
+    stat_labels = [
+        ('项目总数', stats['total_projects']),
+        ('已中标', stats['awarded_projects']),
+        ('已投标', stats['submitted_projects']),
+        ('待跟进', stats['pending_projects']),
+        ('我司报价条数', stats['our_quote_rows']),
+        ('竞对报价条数', stats['competitor_quote_rows']),
+    ]
+    for index, (label, value) in enumerate(stat_labels, start=1):
+        column = (index - 1) * 2 + 1
+        sheet.cell(3, column, label)
+        sheet.cell(3, column + 1, value)
+
+    headers = ['序号', '项目标题', '项目名称', '招标编号', '招标人', '登记年份', '投标状态', '中标状态', '我司报价条数', '竞对报价条数', '最后更新时间']
+    for col_index, header in enumerate(headers, start=1):
+        sheet.cell(5, col_index, header)
+
+    for row_index, item in enumerate(items, start=6):
+        values = [
+            row_index - 5,
+            item.get('title', ''),
+            item.get('project_name', ''),
+            item.get('bid_no', ''),
+            item.get('tenderer', ''),
+            item.get('register_year', ''),
+            item.get('bid_status', ''),
+            item.get('award_status', ''),
+            item.get('our_quote_count', 0),
+            item.get('competitor_quote_count', 0),
+            item.get('updated_at', ''),
+        ]
+        for col_index, value in enumerate(values, start=1):
+            sheet.cell(row_index, col_index, value)
+
+    final_row = max(5, 5 + len(items))
+    apply_plain_table_style(sheet, final_row, len(headers))
+    autosize_sheet(sheet, {1: 8, 2: 26, 3: 30, 4: 22, 5: 24, 6: 12, 7: 12, 8: 12, 9: 12, 10: 14, 11: 20})
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
+def write_overview_block(sheet: Any, row_index: int, title: str, lines: list[str]) -> int:
+    sheet.cell(row_index, 1, title)
+    sheet.merge_cells(start_row=row_index, start_column=1, end_row=row_index, end_column=4)
+    row_index += 1
+    if not lines:
+        lines = ['无']
+    for line in lines:
+        sheet.cell(row_index, 1, line)
+        sheet.merge_cells(start_row=row_index, start_column=1, end_row=row_index, end_column=4)
+        row_index += 1
+    return row_index + 1
+
+
+def build_overview_workbook(
+    title: str,
+    result: dict[str, Any],
+    *,
+    follow_up: dict[str, Any] | None = None,
+    our_quotes: list[dict[str, Any]] | None = None,
+    competitor_quotes: list[dict[str, Any]] | None = None,
+    timeline: list[dict[str, Any]] | None = None,
+) -> BytesIO:
+    summary = result['document_summary']
+    analysis = result['analysis']
+    rows = result['register_rows']
+    review = result['match_review']
+    follow_up = normalize_follow_up(follow_up or {})
+    our_quotes = normalize_quote_rows(our_quotes or [], default_company='我司')
+    competitor_quotes = normalize_quote_rows(competitor_quotes or [])
+    timeline = normalize_timeline_rows(timeline or [])
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = '解析总览'
+    sheet['A1'] = '标书解析总览'
+    sheet.merge_cells('A1:D1')
+    sheet['A2'] = '归档标题'
+    sheet['B2'] = title or summary['project_name'] or '未命名项目'
+    sheet['C2'] = '生成时间'
+    sheet['D2'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    core_pairs = [
+        ('项目名称', summary['project_name'] or '未识别'),
+        ('招标编号', summary['bid_no'] or '未识别'),
+        ('招标人', summary['tenderer'] or '未识别'),
+        ('投标截止时间', summary['bid_deadline'] or '未识别'),
+        ('开标时间', summary['open_time'] or '未识别'),
+        ('投标文件递交方式', summary['submission_method'] or '未识别'),
+        ('保证金金额', summary['deposit_amount'] or '未识别'),
+        ('服务期限', summary['service_period'] or '未识别'),
+        ('投标状态', follow_up['bid_status'] or '待跟进'),
+        ('中标状态', follow_up['award_status'] or '未知'),
+        ('中标日期', follow_up['award_date'] or '-'),
+        ('中标单位', follow_up['award_company'] or '-'),
+        ('我司中标价', follow_up['our_award_amount'] or '-'),
+        ('竞对中标价', follow_up['competitor_award_amount'] or '-'),
+        ('信息来源', follow_up['information_source'] or '-'),
+        ('跟进备注', follow_up['tracking_note'] or '-'),
+    ]
+    sheet['A4'] = '核心信息'
+    sheet.merge_cells('A4:D4')
+    row_index = 5
+    for label, value in core_pairs:
+        sheet.cell(row_index, 1, label)
+        sheet.cell(row_index, 2, value)
+        sheet.merge_cells(start_row=row_index, start_column=2, end_row=row_index, end_column=4)
+        row_index += 1
+
+    row_index += 1
+    row_index = write_overview_block(sheet, row_index, 'AI 解析结论', [analysis['summary'] or '无'])
+    row_index = write_overview_block(sheet, row_index, '资格文件清单', analysis['qualification_files'])
+    row_index = write_overview_block(sheet, row_index, '报价与商务关注点', analysis['business_points'])
+    row_index = write_overview_block(sheet, row_index, '评标得分关注点', analysis['scoring_points'])
+    row_index = write_overview_block(sheet, row_index, '风险提示', analysis['risks'])
+
+    register_lines = []
+    for index, row in enumerate(rows, start=1):
+        register_lines.append(
+            f"{index}. 项目名称：{row.get('project_name') or '未识别'} | 招标编号：{row.get('bid_no') or '未识别'} | 招标人：{row.get('tenderer') or '未识别'} | 投标截止日期：{row.get('bid_deadline') or '未识别'} | 保证金金额：{row.get('deposit_amount') or '未识别'} | 备注：{row.get('remark') or '-'}"
+        )
+    row_index = write_overview_block(sheet, row_index, '登记预览', register_lines)
+
+    our_lines = []
+    for index, row in enumerate(our_quotes, start=1):
+        our_lines.append(
+            f"{index}. 标段：{row.get('package_name') or '-'} | 轮次：第 {row.get('round_no') or 1} 轮 | 报价日期：{row.get('quote_date') or '-'} | 币种：{row.get('currency') or 'CNY'} | 单价：{row.get('unit_price') or '-'} | 总价：{row.get('total_price') or '-'} | 已投：{'是' if row.get('is_submitted') else '否'} | 中标：{'是' if row.get('is_awarded') else '否'} | 备注：{row.get('remark') or '-'}"
+        )
+    row_index = write_overview_block(sheet, row_index, '我司报价一览', our_lines)
+
+    competitor_lines = []
+    for index, row in enumerate(competitor_quotes, start=1):
+        competitor_lines.append(
+            f"{index}. 公司：{row.get('quote_company') or '-'} | 标段：{row.get('package_name') or '-'} | 报价日期：{row.get('quote_date') or '-'} | 币种：{row.get('currency') or 'CNY'} | 单价：{row.get('unit_price') or '-'} | 总价：{row.get('total_price') or '-'} | 排名：{row.get('ranking') or '-'} | 中标：{'是' if row.get('is_awarded') else '否'} | 来源：{row.get('source') or '-'} | 备注：{row.get('remark') or '-'}"
+        )
+    row_index = write_overview_block(sheet, row_index, '竞对报价一览', competitor_lines)
+
+    timeline_lines = [f"[{item.get('date') or '-'}] {item.get('type') or 'note'}：{item.get('note') or '-'}" for item in timeline]
+    row_index = write_overview_block(sheet, row_index, '跟进时间线', timeline_lines)
+
+    review_lines = []
+    for item in review:
+        review_lines.append(
+            f"领域：{item.get('area') or '未分类'} | 事项：{item.get('item') or '-'} | 状态：{item.get('status') or '需人工确认'} | 原因：{item.get('reason') or '-'} | 建议动作：{item.get('action') or '-'}"
+        )
+    write_overview_block(sheet, row_index, '匹配复核', review_lines)
+
+    apply_plain_table_style(sheet, sheet.max_row, 4)
+    sheet.row_dimensions[1].height = 28
+    sheet.column_dimensions['A'].width = 20
+    sheet.column_dimensions['B'].width = 34
+    sheet.column_dimensions['C'].width = 18
+    sheet.column_dimensions['D'].width = 34
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
 
 
 def resolve_source_excerpt(value: str, excerpt: str, document_text_full: str) -> str:
@@ -1033,27 +1717,9 @@ def test_config(payload: ConfigPayload) -> dict[str, Any]:
 
 
 @app.get('/api/projects')
-def list_projects(q: str = '') -> dict[str, Any]:
-    keyword = q.strip().lower()
-    items: list[dict[str, Any]] = []
-    for path in PROJECTS_DIR.glob('*.json'):
-        project = read_project_file(path)
-        if not project:
-            continue
-        meta = project_meta(project)
-        text = ' '.join(
-            [
-                meta.get('title', ''),
-                meta.get('project_name', ''),
-                meta.get('bid_no', ''),
-                meta.get('source_file_name', ''),
-            ]
-        ).lower()
-        if keyword and keyword not in text:
-            continue
-        items.append(meta)
-    items.sort(key=lambda item: item.get('updated_at', ''), reverse=True)
-    return {'items': items}
+def list_projects(q: str = '', year: str = '', award_status: str = '', bid_status: str = '') -> dict[str, Any]:
+    items, stats = collect_project_items(q=q, year=year, award_status=award_status, bid_status=bid_status)
+    return {'items': items, 'stats': stats}
 
 
 @app.post('/api/projects')
@@ -1089,8 +1755,8 @@ def delete_project(project_id: str) -> dict[str, Any]:
 async def parse_bid(file: UploadFile = File(...)) -> dict[str, Any]:
     cleanup_sessions()
     suffix = Path(file.filename or '').suffix.lower()
-    if suffix not in {'.pdf', '.docx'}:
-        raise HTTPException(status_code=400, detail='当前只支持文本型 PDF 或 DOCX。')
+    if suffix not in {'.pdf', '.doc', '.docx', '.xls', '.xlsx'}:
+        raise HTTPException(status_code=400, detail='当前只支持 PDF、DOC、DOCX、XLS、XLSX。')
     temp_path = TMP_DIR / f'{uuid.uuid4().hex}{suffix}'
     temp_path.write_bytes(await file.read())
     try:
@@ -1100,7 +1766,7 @@ async def parse_bid(file: UploadFile = File(...)) -> dict[str, Any]:
     if len(document_text.strip()) < 80:
         raise HTTPException(
             status_code=400,
-            detail='当前版本仅支持可提取文本的 PDF/DOCX，扫描件或空白文件暂不支持。',
+            detail='当前版本仅支持可提取文本的 PDF、Word、Excel 文件，扫描件、空白文件或只有图片的内容暂不支持。',
         )
     result = parse_ai_document(document_text, require_config())
     session_id = create_session_for_result(result)
@@ -1200,11 +1866,67 @@ def export_register(payload: ExportRegisterPayload) -> StreamingResponse:
 @app.post('/api/export/overview')
 def export_overview(payload: ExportOverviewPayload) -> StreamingResponse:
     result = normalize_result_payload(payload.result)
-    output = io.BytesIO(build_overview_text(result).encode('utf-8'))
-    filename = f"bid_overview_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    output = build_overview_workbook(
+        payload.title,
+        result,
+        follow_up=payload.follow_up,
+        our_quotes=payload.our_quotes,
+        competitor_quotes=payload.competitor_quotes,
+        timeline=payload.timeline,
+    )
+    filename = f"bid_overview_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     return StreamingResponse(
         output,
-        media_type='text/markdown; charset=utf-8',
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post('/api/export/our-quotes')
+def export_our_quotes(payload: ExportQuotePayload) -> StreamingResponse:
+    output = build_quote_workbook(
+        title=compact_text(payload.title),
+        follow_up=payload.follow_up,
+        rows=payload.rows,
+        is_competitor=False,
+    )
+    filename = f"our_quotes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post('/api/export/competitor-quotes')
+def export_competitor_quotes(payload: ExportQuotePayload) -> StreamingResponse:
+    output = build_quote_workbook(
+        title=compact_text(payload.title),
+        follow_up=payload.follow_up,
+        rows=payload.rows,
+        is_competitor=True,
+    )
+    filename = f"competitor_quotes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post('/api/export/ledger')
+def export_ledger(payload: ExportLedgerPayload) -> StreamingResponse:
+    output = build_ledger_workbook(
+        q=payload.q,
+        year=payload.year,
+        award_status=payload.award_status,
+        bid_status=payload.bid_status,
+    )
+    year = compact_text(payload.year) or 'all'
+    filename = f"history_ledger_{year}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         headers={'Content-Disposition': f'attachment; filename="{filename}"'},
     )
 

@@ -1,8 +1,12 @@
-﻿.agents/
+.agents/
 .codex/
 __pycache__/
 *.pyc
+.venv/
 startup.log
+startup_*.log
 data/
 招标文件/
 .env
+_mini_test.bat
+TRACEABILITY_PLAN.md
