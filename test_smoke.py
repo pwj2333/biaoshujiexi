@@ -1,12 +1,13 @@
 import tempfile
 from io import BytesIO
 from pathlib import Path
+from zipfile import ZipFile
 
 import httpx
 from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 
-from app import ProjectPayload, app, call_chat_completion, extract_document_text, load_users, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_project, save_users
+from app import ProjectPayload, app, call_chat_completion, extract_document_text, load_users, market_record_path, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_project, save_users
 
 
 def cleanup(project_id: str) -> None:
@@ -17,6 +18,10 @@ def cleanup_user(username: str) -> None:
     payload = load_users()
     payload['users'] = [user for user in payload.get('users', []) if user.get('username') != username]
     save_users(payload)
+
+
+def cleanup_market(kind: str, record_id: str) -> None:
+    market_record_path(kind, record_id).unlink(missing_ok=True)
 
 
 sample = parse_json_text('```json {"ok": true} ```')
@@ -304,6 +309,148 @@ assert wb5['历史台账']['D2'].value == '2026'
 assert wb5['历史台账']['F2'].value == '已投标'
 assert wb5['历史台账']['H2'].value == '已中标'
 assert wb5['历史台账']['B6'].value == '接口测试项目'
+
+cargo_a = {
+    'board_type': '\u5373\u65f6\u8d27\u76d8',
+    'segment': '\u5185\u8d38\u5316',
+    'cargo_name': 'smoke-benzene-market-filter',
+    'tonnage': '4000\u5428',
+    'load_port': '\u5f20\u5bb6\u6e2f',
+    'discharge_port': '\u4e1c\u839e',
+    'cargo_owner': '\u8fdc\u5927',
+    'status': '\u8ddf\u8fdb\u4e2d',
+    'raw_text': 'raw text mentions smoke-methane-market-filter only',
+}
+cargo_b = {**cargo_a, 'cargo_name': 'smoke-methane-market-filter', 'raw_text': 'same as structured'}
+cargo_a_resp = client.post('/api/market-skill/cargo', json={'kind': 'cargo', 'record': cargo_a}, headers=auth_headers)
+cargo_b_resp = client.post('/api/market-skill/cargo', json={'kind': 'cargo', 'record': cargo_b}, headers=auth_headers)
+assert cargo_a_resp.status_code == 200
+assert cargo_b_resp.status_code == 200
+cargo_a_id = cargo_a_resp.json()['record']['id']
+cargo_b_id = cargo_b_resp.json()['record']['id']
+try:
+    methane_resp = client.get(
+        '/api/market-skill/cargo',
+        params={'q': 'smoke-methane-market-filter', 'segment': '\u5185\u8d38\u5316', 'status': '\u8ddf\u8fdb\u4e2d'},
+        headers=auth_headers,
+    )
+    benzene_resp = client.get(
+        '/api/market-skill/cargo',
+        params={'q': 'smoke-benzene-market-filter', 'segment': '\u5185\u8d38\u5316', 'status': '\u8ddf\u8fdb\u4e2d'},
+        headers=auth_headers,
+    )
+    assert methane_resp.status_code == 200
+    assert benzene_resp.status_code == 200
+    assert [item['id'] for item in methane_resp.json()['items']] == [cargo_b_id]
+    assert [item['id'] for item in benzene_resp.json()['items']] == [cargo_a_id]
+finally:
+    cleanup_market('cargo', cargo_a_id)
+    cleanup_market('cargo', cargo_b_id)
+
+cargo_deal = {
+    'board_type': '\u5373\u65f6\u8d27\u76d8',
+    'segment': '\u5185\u8d38\u5316',
+    'cargo_name': 'smoke-trend-xylene',
+    'cargo_standard_name': 'smoke-trend-xylene',
+    'tonnage': '3000\u5428',
+    'load_port': '\u5b81\u6ce2',
+    'discharge_port': '\u4e1c\u839e',
+    'route': '\u5b81\u6ce2 - \u4e1c\u839e',
+    'cargo_date': '2026-06-01',
+    'deal_date': '2026-06-15',
+    'status': '\u5df2\u6210\u4ea4',
+    'deal_price': '128',
+    'price_unit': '\u5143/\u5428',
+    'currency': 'CNY',
+}
+cargo_open = {**cargo_deal, 'status': '\u8ddf\u8fdb\u4e2d', 'deal_price': '999', 'cargo_name': 'smoke-trend-open'}
+cargo_deal_resp = client.post('/api/market-skill/cargo', json={'kind': 'cargo', 'record': cargo_deal}, headers=auth_headers)
+cargo_open_resp = client.post('/api/market-skill/cargo', json={'kind': 'cargo', 'record': cargo_open}, headers=auth_headers)
+assert cargo_deal_resp.status_code == 200
+assert cargo_open_resp.status_code == 200
+cargo_deal_id = cargo_deal_resp.json()['record']['id']
+cargo_open_id = cargo_open_resp.json()['record']['id']
+try:
+    cargo_report_resp = client.post(
+        '/api/market-skill/report',
+        json={
+            'kind': 'cargo',
+            'period': 'monthly',
+            'start_date': '2026-06-01',
+            'end_date': '2026-06-30',
+            'filters': {'q': 'smoke-trend'},
+        },
+        headers=auth_headers,
+    )
+    assert cargo_report_resp.status_code == 200
+    cargo_report = cargo_report_resp.json()
+    assert cargo_report['source_stats']['deal_count'] == 1
+    assert cargo_report['trend_points'][0]['avg_price'] == 128
+    assert cargo_report['detail_rows'][0]['price'] == 128
+    cargo_report_export_resp = client.post(
+        '/api/export/market-skill-report',
+        json={'kind': 'cargo', 'report': cargo_report, 'format': 'xlsx'},
+        headers=auth_headers,
+    )
+    assert cargo_report_export_resp.status_code == 200
+    wb6 = load_workbook(BytesIO(cargo_report_export_resp.content))
+    assert wb6['分析报告']['A1'].value == '商机市场分析报告'
+    cargo_docx_resp = client.post(
+        '/api/export/market-skill-report',
+        json={'kind': 'cargo', 'report': cargo_report},
+        headers=auth_headers,
+    )
+    assert cargo_docx_resp.status_code == 200
+    with ZipFile(BytesIO(cargo_docx_resp.content)) as docx:
+        names = set(docx.namelist())
+        assert {'[Content_Types].xml', '_rels/.rels', 'word/document.xml', 'word/styles.xml'} <= names
+        assert '商机市场 AI 分析报告' in docx.read('word/document.xml').decode('utf-8')
+finally:
+    cleanup_market('cargo', cargo_deal_id)
+    cleanup_market('cargo', cargo_open_id)
+
+newbuilding_record = {
+    'stage': '\u5df2\u5b8c\u9020\u5e76\u51fa\u5382\u6295\u8fd0',
+    'ship_name': 'smoke-newbuilding-1',
+    'update_date': '2026-06-02',
+    'status_update_date': '2026-06-20',
+    'shipyard': '\u6c5f\u5357\u9020\u8239',
+    'owner': '\u6d4b\u8bd5\u8239\u4e1c',
+    'dwt': '25000DWT',
+    'build_status': '\u5df2\u4ea4\u4ed8',
+    'delivery_time': '2026\u5e74',
+    'actual_delivery_date': '2026-06-18',
+    'status_note': '\u51fa\u5382\u6295\u8fd0',
+}
+newbuilding_resp = client.post('/api/market-skill/newbuilding', json={'kind': 'newbuilding', 'record': newbuilding_record}, headers=auth_headers)
+assert newbuilding_resp.status_code == 200
+newbuilding_id = newbuilding_resp.json()['record']['id']
+try:
+    newbuilding_report_resp = client.post(
+        '/api/market-skill/report',
+        json={
+            'kind': 'newbuilding',
+            'period': 'weekly',
+            'start_date': '2026-06-01',
+            'end_date': '2026-06-30',
+            'filters': {'q': 'smoke-newbuilding-1'},
+        },
+        headers=auth_headers,
+    )
+    assert newbuilding_report_resp.status_code == 200
+    newbuilding_report = newbuilding_report_resp.json()
+    assert newbuilding_report['source_stats']['delivered'] == 1
+    assert newbuilding_report['detail_rows'][0]['ship_name'] == 'smoke-newbuilding-1'
+    newbuilding_export_resp = client.post(
+        '/api/export/market-skill-report',
+        json={'kind': 'newbuilding', 'report': newbuilding_report, 'format': 'xlsx'},
+        headers=auth_headers,
+    )
+    assert newbuilding_export_resp.status_code == 200
+    wb7 = load_workbook(BytesIO(newbuilding_export_resp.content))
+    assert wb7['分析报告']['A1'].value == '新造船市场分析报告'
+finally:
+    cleanup_market('newbuilding', newbuilding_id)
 
 bad_docx_resp = client.post(
     '/api/parse',

@@ -315,7 +315,7 @@ function Ensure-Requirements {
 
     $importCheck = Invoke-Native -FilePath $VenvPython -Arguments @(
         '-c',
-        'import fastapi, uvicorn, httpx, multipart, openpyxl, pypdf'
+        'import fastapi, uvicorn, httpx, multipart, openpyxl, pypdf, docx'
     ) -AllowFailure -SkipLog -Label 'dependency import check'
     if ($importCheck.ExitCode -eq 0) { return }
 
@@ -332,7 +332,7 @@ function Ensure-Requirements {
 
     $recheck = Invoke-Native -FilePath $VenvPython -Arguments @(
         '-c',
-        'import fastapi, uvicorn, httpx, multipart, openpyxl, pypdf'
+        'import fastapi, uvicorn, httpx, multipart, openpyxl, pypdf, docx'
     ) -AllowFailure -SkipLog -Label 'dependency recheck'
     if ($recheck.ExitCode -ne 0) {
         throw 'Dependencies still fail after install.'

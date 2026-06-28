@@ -16,6 +16,17 @@ from zipfile import BadZipFile, ZipFile
 
 import httpx
 import uvicorn
+try:
+    from docx import Document
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Inches, Pt, RGBColor
+except ImportError:
+    Document = None
+    WD_CELL_VERTICAL_ALIGNMENT = WD_TABLE_ALIGNMENT = WD_ALIGN_PARAGRAPH = None
+    OxmlElement = qn = Inches = Pt = RGBColor = None
 from fastapi import Cookie, Depends, FastAPI, File, Header, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +43,7 @@ PACKAGE_TEMPLATE_DIR = BASE_DIR / '模板文件'
 DATA_DIR = BASE_DIR / 'data'
 TMP_DIR = DATA_DIR / 'tmp'
 PROJECTS_DIR = DATA_DIR / 'projects'
+MARKET_SKILL_DIR = DATA_DIR / 'market_skill'
 CONFIG_PATH = DATA_DIR / 'config.json'
 USERS_PATH = DATA_DIR / 'users.json'
 PACKAGE_EXTRACTION_TEMPLATE_PATH = PACKAGE_TEMPLATE_DIR / 'extraction_template.xlsx'
@@ -43,7 +55,7 @@ DEFAULT_ADMIN_USERNAME = 'ruico'
 DEFAULT_ADMIN_PASSWORD = 'Ruico668@'
 AUTH_COOKIE_NAME = 'bid_parser_token'
 
-for folder in (DATA_DIR, TMP_DIR, PROJECTS_DIR):
+for folder in (DATA_DIR, TMP_DIR, PROJECTS_DIR, MARKET_SKILL_DIR):
     folder.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title='标书解析与登记 Demo')
@@ -381,6 +393,40 @@ class ExportLedgerPayload(BaseModel):
     year: str = ''
     award_status: str = ''
     bid_status: str = ''
+
+
+class MarketExtractPayload(BaseModel):
+    kind: str
+    text: str = Field(min_length=1)
+
+
+class MarketRecordPayload(BaseModel):
+    kind: str
+    record: dict[str, Any] = Field(default_factory=dict)
+
+
+class MarketExportPayload(BaseModel):
+    kind: str
+    q: str = ''
+    segment: str = ''
+    board_type: str = ''
+    status: str = ''
+    stage: str = ''
+
+
+class MarketReportPayload(BaseModel):
+    kind: str
+    period: str = 'custom'
+    start_date: str = ''
+    end_date: str = ''
+    custom_prompt: str = ''
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+
+class MarketReportExportPayload(BaseModel):
+    kind: str
+    report: dict[str, Any] = Field(default_factory=dict)
+    format: str = 'docx'
 
 
 class ProjectPayload(BaseModel):
@@ -1817,6 +1863,839 @@ def project_register_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     return [refine_register_row(row if isinstance(row, dict) else {}, normalize_summary({})) for row in rows]
 
 
+MARKET_KINDS = {'cargo', 'newbuilding'}
+MARKET_CARGO_FIELDS = [
+    ('board_type', '货盘类型'),
+    ('segment', '业务板块'),
+    ('cargo_name', '货品名称'),
+    ('tonnage', '货物吨数'),
+    ('load_port', '装港'),
+    ('discharge_port', '卸港'),
+    ('laycan', '装载期'),
+    ('cargo_owner', '货主/租家'),
+    ('cargo_date', '货盘日期'),
+    ('source', '货盘来源'),
+    ('status', '是否达成合作'),
+    ('final_price', '成交价'),
+    ('deal_date', '成交日期'),
+    ('deal_price', '最终成交价格'),
+    ('price_unit', '价格单位'),
+    ('currency', '币种'),
+    ('route', '航线'),
+    ('cargo_standard_name', '货品标准名'),
+    ('market_info', '市场了解信息'),
+    ('loss_reason', '未达成/放弃原因'),
+    ('competitor_name', '竞争对手'),
+    ('competitor_price', '竞争对手价格'),
+    ('remark', '备注'),
+]
+MARKET_NEWBUILDING_FIELDS = [
+    ('stage', '建造阶段'),
+    ('ship_name', '船名'),
+    ('update_date', '更新日期'),
+    ('shipyard', '造船厂'),
+    ('owner', '船东'),
+    ('dwt', '载重吨DWT'),
+    ('build_status', '当前建造状态'),
+    ('delivery_time', '预计交付时间'),
+    ('actual_delivery_date', '实际出厂时间'),
+    ('status_update_date', '状态更新时间'),
+    ('status_note', '状态变化备注'),
+    ('contract_date', '合同签订日期'),
+    ('contract_price', '新造船合同价格'),
+    ('ship_type', '船型'),
+    ('source', '信息来源'),
+    ('remark', '备注'),
+]
+MARKET_SEARCH_FIELDS = {
+    'cargo': (
+        'cargo_name',
+        'tonnage',
+        'load_port',
+        'discharge_port',
+        'laycan',
+        'cargo_owner',
+        'cargo_date',
+        'source',
+        'status',
+        'final_price',
+        'deal_date',
+        'deal_price',
+        'price_unit',
+        'currency',
+        'route',
+        'cargo_standard_name',
+        'market_info',
+        'loss_reason',
+        'competitor_name',
+        'competitor_price',
+        'remark',
+    ),
+    'newbuilding': (
+        'stage',
+        'ship_name',
+        'update_date',
+        'shipyard',
+        'owner',
+        'dwt',
+        'build_status',
+        'delivery_time',
+        'actual_delivery_date',
+        'status_update_date',
+        'status_note',
+        'contract_date',
+        'contract_price',
+        'ship_type',
+        'source',
+        'remark',
+    ),
+}
+
+
+def market_kind_dir(kind: str) -> Path:
+    if kind not in MARKET_KINDS:
+        raise HTTPException(status_code=400, detail='市场情报类型无效。')
+    folder = MARKET_SKILL_DIR / kind
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def market_record_path(kind: str, record_id: str) -> Path:
+    if not re.fullmatch(r'[a-f0-9]{32}', record_id):
+        raise HTTPException(status_code=400, detail='市场情报记录 ID 无效。')
+    return market_kind_dir(kind) / f'{record_id}.json'
+
+
+def market_text(value: Any) -> str:
+    return compact_paragraph(value)
+
+
+def today_text() -> str:
+    return datetime.now().strftime('%Y-%m-%d')
+
+
+def normalize_market_cargo(raw: Any, *, record_id: str = '', created_at: str = '') -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    now = datetime.now().isoformat(timespec='seconds')
+    board_type = market_text(source.get('board_type') or '即时货盘')
+    if board_type not in {'长期货盘', '即时货盘'}:
+        board_type = '即时货盘'
+    segment = market_text(source.get('segment') or '内贸化')
+    if segment not in {'内贸化', '内贸油', '外贸'}:
+        segment = '内贸化'
+    status = market_text(source.get('status') or '跟进中')
+    if status not in {'跟进中', '已成交', '未成交', '放弃'}:
+        status = '跟进中'
+    load_port = market_text(source.get('load_port'))
+    discharge_port = market_text(source.get('discharge_port'))
+    final_price = market_text(source.get('final_price'))
+    deal_price = market_text(source.get('deal_price') or final_price)
+    route = market_text(source.get('route')) or ' - '.join(part for part in [load_port, discharge_port] if part)
+    cargo_name = market_text(source.get('cargo_name'))
+    return {
+        'id': record_id or market_text(source.get('id')) or uuid.uuid4().hex,
+        'kind': 'cargo',
+        'board_type': board_type,
+        'segment': segment,
+        'cargo_name': cargo_name,
+        'tonnage': market_text(source.get('tonnage')),
+        'load_port': load_port,
+        'discharge_port': discharge_port,
+        'laycan': market_text(source.get('laycan')),
+        'cargo_owner': market_text(source.get('cargo_owner')),
+        'cargo_date': market_text(source.get('cargo_date')) or today_text(),
+        'source': market_text(source.get('source') or '手动录入'),
+        'status': status,
+        'final_price': final_price or deal_price,
+        'deal_date': market_text(source.get('deal_date')),
+        'deal_price': deal_price,
+        'price_unit': market_text(source.get('price_unit') or '元/吨'),
+        'currency': market_text(source.get('currency') or 'CNY'),
+        'route': route,
+        'cargo_standard_name': market_text(source.get('cargo_standard_name')) or cargo_name,
+        'market_info': market_text(source.get('market_info')),
+        'loss_reason': market_text(source.get('loss_reason')),
+        'competitor_name': market_text(source.get('competitor_name')),
+        'competitor_price': market_text(source.get('competitor_price')),
+        'remark': market_text(source.get('remark')),
+        'raw_text': market_text(source.get('raw_text')),
+        'created_at': created_at or market_text(source.get('created_at')) or now,
+        'updated_at': now,
+    }
+
+
+def normalize_market_newbuilding(raw: Any, *, record_id: str = '', created_at: str = '') -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    now = datetime.now().isoformat(timespec='seconds')
+    stage = market_text(source.get('stage') or '信息待获取')
+    allowed_stages = {'已完造并出厂投运', '合同签订未开造', '预计2027年完造出厂', '预计2028年完造出厂', '信息待获取'}
+    if stage not in allowed_stages:
+        stage = '信息待获取'
+    return {
+        'id': record_id or market_text(source.get('id')) or uuid.uuid4().hex,
+        'kind': 'newbuilding',
+        'stage': stage,
+        'ship_name': market_text(source.get('ship_name')),
+        'update_date': market_text(source.get('update_date')) or today_text(),
+        'shipyard': market_text(source.get('shipyard')),
+        'owner': market_text(source.get('owner')),
+        'dwt': market_text(source.get('dwt')),
+        'build_status': market_text(source.get('build_status')),
+        'delivery_time': market_text(source.get('delivery_time')),
+        'actual_delivery_date': market_text(source.get('actual_delivery_date')),
+        'status_update_date': market_text(source.get('status_update_date') or source.get('update_date')) or today_text(),
+        'status_note': market_text(source.get('status_note')),
+        'contract_date': market_text(source.get('contract_date')),
+        'contract_price': market_text(source.get('contract_price')),
+        'ship_type': market_text(source.get('ship_type')),
+        'source': market_text(source.get('source') or '手动录入'),
+        'remark': market_text(source.get('remark')),
+        'raw_text': market_text(source.get('raw_text')),
+        'created_at': created_at or market_text(source.get('created_at')) or now,
+        'updated_at': now,
+    }
+
+
+def normalize_market_record(kind: str, raw: Any, *, record_id: str = '', created_at: str = '') -> dict[str, Any]:
+    if kind == 'cargo':
+        return normalize_market_cargo(raw, record_id=record_id, created_at=created_at)
+    if kind == 'newbuilding':
+        return normalize_market_newbuilding(raw, record_id=record_id, created_at=created_at)
+    raise HTTPException(status_code=400, detail='市场情报类型无效。')
+
+
+def read_market_record(kind: str, path: Path) -> dict[str, Any] | None:
+    try:
+        raw = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return normalize_market_record(kind, raw, record_id=path.stem, created_at=market_text(raw.get('created_at')))
+
+
+def load_market_record(kind: str, record_id: str) -> dict[str, Any]:
+    path = market_record_path(kind, record_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail='市场情报记录不存在。')
+    record = read_market_record(kind, path)
+    if not record:
+        raise HTTPException(status_code=500, detail='市场情报记录文件损坏。')
+    return record
+
+
+def save_market_record(kind: str, raw: dict[str, Any], *, record_id: str | None = None, created_at: str = '') -> dict[str, Any]:
+    record = normalize_market_record(kind, raw, record_id=record_id or '', created_at=created_at)
+    path = market_record_path(kind, record['id'])
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
+    return record
+
+
+def list_market_records(
+    kind: str,
+    *,
+    q: str = '',
+    segment: str = '',
+    board_type: str = '',
+    status: str = '',
+    stage: str = '',
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    keyword = market_text(q).lower()
+    items: list[dict[str, Any]] = []
+    for path in market_kind_dir(kind).glob('*.json'):
+        record = read_market_record(kind, path)
+        if not record:
+            continue
+        haystack = ' '.join(str(record.get(key, '')) for key in MARKET_SEARCH_FIELDS[kind]).lower()
+        if keyword and keyword not in haystack:
+            continue
+        if kind == 'cargo':
+            if segment and record.get('segment') != segment:
+                continue
+            if board_type and record.get('board_type') != board_type:
+                continue
+            if status and record.get('status') != status:
+                continue
+        if kind == 'newbuilding' and stage and record.get('stage') != stage:
+            continue
+        items.append(record)
+    items.sort(key=lambda item: item.get('updated_at', ''), reverse=True)
+    if kind == 'cargo':
+        stats = {
+            'total': len(items),
+            'won': sum(1 for item in items if item.get('status') == '已成交'),
+            'lost': sum(1 for item in items if item.get('status') in {'未成交', '放弃'}),
+            'tracking': sum(1 for item in items if item.get('status') == '跟进中'),
+            'with_final_price': sum(1 for item in items if item.get('final_price')),
+        }
+    else:
+        stats = {'total': len(items)}
+        for stage_name in ['已完造并出厂投运', '合同签订未开造', '预计2027年完造出厂', '预计2028年完造出厂', '信息待获取']:
+            stats[stage_name] = sum(1 for item in items if item.get('stage') == stage_name)
+    return items, stats
+
+
+def parse_market_number(value: Any) -> float | None:
+    text = market_text(value).replace(',', '')
+    match = re.search(r'-?\d+(?:\.\d+)?', text)
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def parse_market_date(value: Any) -> Any:
+    text = market_text(value)
+    match = re.search(r'(20\d{2})[年/\-.]?\s*(\d{1,2})?[月/\-.]?\s*(\d{1,2})?', text)
+    if not match:
+        return None
+    year = int(match.group(1))
+    month = int(match.group(2) or 1)
+    day = int(match.group(3) or 1)
+    try:
+        return datetime(year, month, day).date()
+    except ValueError:
+        return None
+
+
+def market_date_text(value: Any) -> str:
+    parsed = parse_market_date(value)
+    return parsed.isoformat() if parsed else market_text(value)
+
+
+def market_month_text(value: Any) -> str:
+    parsed = parse_market_date(value)
+    return parsed.strftime('%Y-%m') if parsed else ''
+
+
+def market_in_date_range(value: Any, start_date: Any, end_date: Any) -> bool:
+    parsed = parse_market_date(value)
+    if start_date and (not parsed or parsed < start_date):
+        return False
+    if end_date and (not parsed or parsed > end_date):
+        return False
+    return True
+
+
+def market_filter_value(filters: dict[str, Any], key: str) -> str:
+    return market_text(filters.get(key, '')) if isinstance(filters, dict) else ''
+
+
+def filtered_market_report_items(kind: str, payload: MarketReportPayload) -> list[dict[str, Any]]:
+    filters = payload.filters if isinstance(payload.filters, dict) else {}
+    items, _ = list_market_records(
+        kind,
+        q=market_filter_value(filters, 'q'),
+        segment=market_filter_value(filters, 'segment'),
+        board_type=market_filter_value(filters, 'board_type'),
+        status=market_filter_value(filters, 'status'),
+        stage=market_filter_value(filters, 'stage'),
+    )
+    start_date = parse_market_date(payload.start_date)
+    end_date = parse_market_date(payload.end_date)
+    cargo_filter = market_filter_value(filters, 'cargo')
+    route_filter = market_filter_value(filters, 'route')
+    filtered: list[dict[str, Any]] = []
+    for item in items:
+        if kind == 'cargo':
+            if cargo_filter and cargo_filter not in (item.get('cargo_standard_name') or item.get('cargo_name') or ''):
+                continue
+            if route_filter and route_filter not in (item.get('route') or ''):
+                continue
+            record_date = item.get('deal_date') or item.get('cargo_date') or item.get('updated_at')
+        else:
+            record_date = item.get('status_update_date') or item.get('update_date') or item.get('updated_at')
+        if not market_in_date_range(record_date, start_date, end_date):
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def top_counts(values: list[str], limit: int = 6) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for value in values:
+        value = market_text(value)
+        if value:
+            counts[value] = counts.get(value, 0) + 1
+    return [{'name': name, 'count': count} for name, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)[:limit]]
+
+
+def fallback_cargo_report(payload: MarketReportPayload) -> dict[str, Any]:
+    items = filtered_market_report_items('cargo', payload)
+    deal_rows: list[dict[str, Any]] = []
+    groups: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in items:
+        if item.get('status') != '已成交':
+            continue
+        price = parse_market_number(item.get('deal_price') or item.get('final_price'))
+        if price is None:
+            continue
+        deal_date = item.get('deal_date') or item.get('cargo_date') or item.get('updated_at')
+        month = market_month_text(deal_date) or '未填月份'
+        cargo = item.get('cargo_standard_name') or item.get('cargo_name') or '未填货品'
+        route = item.get('route') or ' - '.join(part for part in [item.get('load_port'), item.get('discharge_port')] if part) or '未填航线'
+        row = {
+            'deal_date': market_date_text(deal_date),
+            'month': month,
+            'cargo': cargo,
+            'route': route,
+            'price': price,
+            'price_unit': item.get('price_unit') or '元/吨',
+            'currency': item.get('currency') or 'CNY',
+            'cargo_owner': item.get('cargo_owner') or '',
+            'competitor_name': item.get('competitor_name') or '',
+            'competitor_price': item.get('competitor_price') or '',
+            'remark': item.get('remark') or '',
+        }
+        deal_rows.append(row)
+        group = groups.setdefault((month, cargo, route), {'month': month, 'cargo': cargo, 'route': route, 'sum': 0.0, 'count': 0, 'price_unit': row['price_unit'], 'currency': row['currency']})
+        group['sum'] += price
+        group['count'] += 1
+    trend_points = [
+        {
+            'month': group['month'],
+            'cargo': group['cargo'],
+            'route': group['route'],
+            'avg_price': round(group['sum'] / group['count'], 2),
+            'count': group['count'],
+            'price_unit': group['price_unit'],
+            'currency': group['currency'],
+        }
+        for group in groups.values()
+    ]
+    trend_points.sort(key=lambda item: (item['month'], item['cargo'], item['route']))
+    deal_rows.sort(key=lambda item: item.get('deal_date') or '', reverse=True)
+    won = sum(1 for item in items if item.get('status') == '已成交')
+    lost = sum(1 for item in items if item.get('status') in {'未成交', '放弃'})
+    tracking = sum(1 for item in items if item.get('status') == '跟进中')
+    avg_price = round(sum(row['price'] for row in deal_rows) / len(deal_rows), 2) if deal_rows else 0
+    source_stats = {
+        'total': len(items),
+        'won': won,
+        'lost': lost,
+        'tracking': tracking,
+        'deal_count': len(deal_rows),
+        'avg_price': avg_price,
+        'win_rate': round(won * 100 / len(items), 1) if items else 0,
+        'loss_reasons': top_counts([item.get('loss_reason', '') for item in items if item.get('status') in {'未成交', '放弃'}]),
+        'competitor_price_count': sum(1 for item in items if parse_market_number(item.get('competitor_price')) is not None),
+    }
+    direction = '成交样本不足，暂不判断运价趋势'
+    if len(trend_points) >= 2:
+        direction = '近期均价上行' if trend_points[-1]['avg_price'] > trend_points[0]['avg_price'] else '近期均价持平或下行'
+    return {
+        'summary': f"本期共纳入 {len(items)} 条商机，已成交 {won} 条，成交价样本 {len(deal_rows)} 条，平均成交价 {avg_price or '-'}。",
+        'key_findings': [direction, f"成交率约 {source_stats['win_rate']}%。", f"竞对价格样本 {source_stats['competitor_price_count']} 条。"],
+        'trend_points': trend_points,
+        'detail_rows': deal_rows,
+        'risks': ['成交样本少时不要直接外推市场价格。'] if len(deal_rows) < 3 else [],
+        'recommendations': ['继续补全成交日期、最终成交价、竞对价格和丢单原因，优先沉淀同航线同货品样本。'],
+        'source_stats': source_stats,
+        'generated_at': datetime.now().isoformat(timespec='seconds'),
+        'period': payload.period,
+        'kind': 'cargo',
+    }
+
+
+def fallback_newbuilding_report(payload: MarketReportPayload) -> dict[str, Any]:
+    items = filtered_market_report_items('newbuilding', payload)
+    stage_counts = top_counts([item.get('stage', '') for item in items], limit=10)
+    delivery_years: list[str] = []
+    for item in items:
+        delivery_text = ' '.join([item.get('actual_delivery_date', ''), item.get('delivery_time', ''), item.get('stage', '')])
+        match = re.search(r'(20\d{2})', delivery_text)
+        if match:
+            delivery_years.append(match.group(1))
+    recent_changes = sorted(
+        [
+            {
+                'status_update_date': market_date_text(item.get('status_update_date') or item.get('update_date')),
+                'ship_name': item.get('ship_name') or '',
+                'shipyard': item.get('shipyard') or '',
+                'owner': item.get('owner') or '',
+                'stage': item.get('stage') or '',
+                'delivery_time': item.get('delivery_time') or '',
+                'actual_delivery_date': item.get('actual_delivery_date') or '',
+                'status_note': item.get('status_note') or item.get('build_status') or item.get('remark') or '',
+            }
+            for item in items
+        ],
+        key=lambda item: item.get('status_update_date') or '',
+        reverse=True,
+    )
+    delivered = sum(1 for item in items if item.get('stage') == '已完造并出厂投运' or item.get('actual_delivery_date'))
+    source_stats = {
+        'total': len(items),
+        'delivered': delivered,
+        'stage_counts': stage_counts,
+        'delivery_year_counts': top_counts(delivery_years, limit=8),
+        'recent_change_count': len(recent_changes),
+    }
+    stage_text = ', '.join(f"{item['name']} {item['count']} 条" for item in stage_counts) or '暂无'
+    return {
+        'summary': f"本期共纳入 {len(items)} 条新造船信息，已出厂/投运 {delivered} 条。",
+        'key_findings': [f"主要阶段分布：{stage_text}。"],
+        'trend_points': recent_changes[:30],
+        'detail_rows': recent_changes,
+        'risks': ['若未来交付集中，需关注供给释放对运价和船舶投资节奏的影响。'] if items else [],
+        'recommendations': ['持续维护状态更新时间、预计交付时间和实际出厂时间，形成周/月状态变化口径。'],
+        'source_stats': source_stats,
+        'generated_at': datetime.now().isoformat(timespec='seconds'),
+        'period': payload.period,
+        'kind': 'newbuilding',
+    }
+
+
+def ai_enhance_market_report(report: dict[str, Any], custom_prompt: str = '') -> dict[str, Any]:
+    config = load_config()
+    if not config.get('base_url') or not config.get('api_key') or not config.get('model'):
+        return report
+    prompt = json.dumps(
+        {
+            'kind': report.get('kind'),
+            'period': report.get('period'),
+            'source_stats': report.get('source_stats'),
+            'trend_points': report.get('trend_points', [])[:80],
+            'detail_rows': report.get('detail_rows', [])[:80],
+            'user_prompt': market_text(custom_prompt)[:2000],
+            'required_json': {
+                'summary': '',
+                'key_findings': [],
+                'risks': [],
+                'recommendations': [],
+            },
+        },
+        ensure_ascii=False,
+    )
+    try:
+        content = call_chat_completion(
+            config,
+            system_prompt='你是航运市场分析助手。优先满足用户提示词，但只能基于输入数据输出严格 JSON，不要 Markdown，不要编造未提供的数据。',
+            user_prompt=prompt,
+            temperature=0.1,
+        )
+        ai_report = parse_json_text(content)
+    except HTTPException as exc:
+        report['risks'] = [*report.get('risks', []), f"AI 结论生成失败，已保留本地统计报告：{exc.detail}"]
+        return report
+    for key in ['summary', 'key_findings', 'risks', 'recommendations']:
+        if ai_report.get(key):
+            report[key] = ai_report[key]
+    return report
+
+
+def build_market_report(payload: MarketReportPayload) -> dict[str, Any]:
+    kind = payload.kind.strip()
+    if kind not in MARKET_KINDS:
+        raise HTTPException(status_code=400, detail='市场情报类型无效。')
+    if payload.period not in {'weekly', 'monthly', 'custom'}:
+        payload.period = 'custom'
+    report = fallback_cargo_report(payload) if kind == 'cargo' else fallback_newbuilding_report(payload)
+    return ai_enhance_market_report(report, payload.custom_prompt)
+
+
+def build_market_report_workbook(kind: str, report: dict[str, Any]) -> BytesIO:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = '分析报告'
+    title = '商机市场分析报告' if kind == 'cargo' else '新造船市场分析报告'
+    sheet['A1'] = title
+    sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
+    rows = [
+        ('生成时间', report.get('generated_at', datetime.now().isoformat(timespec='seconds'))),
+        ('报告周期', '周报' if report.get('period') == 'weekly' else '月报'),
+        ('报告摘要', report.get('summary', '')),
+        ('关键发现', '\n'.join(map(str, report.get('key_findings') or []))),
+        ('风险提示', '\n'.join(map(str, report.get('risks') or []))),
+        ('经营建议', '\n'.join(map(str, report.get('recommendations') or []))),
+    ]
+    for row_index, (label, value) in enumerate(rows, start=2):
+        sheet.cell(row_index, 1, label)
+        sheet.cell(row_index, 2, value)
+        sheet.merge_cells(start_row=row_index, start_column=2, end_row=row_index, end_column=4)
+    apply_plain_table_style(sheet, 1 + len(rows), 4)
+    autosize_sheet(sheet, {1: 16, 2: 36, 3: 36, 4: 36})
+
+    stats_sheet = workbook.create_sheet('统计数据')
+    stats_sheet.append(['指标', '值'])
+    for key, value in (report.get('source_stats') or {}).items():
+        stats_sheet.append([key, json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else value])
+    apply_plain_table_style(stats_sheet, max(1, stats_sheet.max_row), 2)
+    autosize_sheet(stats_sheet, {1: 22, 2: 72})
+
+    detail_sheet = workbook.create_sheet('数据明细')
+    detail_rows = report.get('detail_rows') or report.get('trend_points') or []
+    headers = list(detail_rows[0].keys()) if detail_rows else ['说明']
+    detail_sheet.append(headers)
+    for row in detail_rows:
+        detail_sheet.append([row.get(header, '') for header in headers])
+    if not detail_rows:
+        detail_sheet.append(['暂无明细数据'])
+    apply_plain_table_style(detail_sheet, max(1, detail_sheet.max_row), len(headers))
+    autosize_sheet(detail_sheet, {index: 18 for index in range(1, min(len(headers), 12) + 1)})
+
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
+def build_market_report_docx(kind: str, report: dict[str, Any]) -> BytesIO:
+    if Document is None:
+        raise HTTPException(status_code=500, detail='缺少 python-docx 依赖，请运行：python -m pip install python-docx，或重新使用一键启动安装依赖。')
+
+    def set_cell_shading(cell: Any, fill: str) -> None:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        shade = OxmlElement('w:shd')
+        shade.set(qn('w:fill'), fill)
+        tc_pr.append(shade)
+
+    def set_cell_text(cell: Any, text: Any, *, bold: bool = False, color: str = '222222') -> None:
+        cell.text = ''
+        paragraph = cell.paragraphs[0]
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER if bold else WD_ALIGN_PARAGRAPH.LEFT
+        run = paragraph.add_run(str(text if text is not None else ''))
+        run.bold = bold
+        run.font.name = '微软雅黑'
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
+        run.font.size = Pt(10.5)
+        run.font.color.rgb = RGBColor.from_string(color)
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+
+    def add_heading(text: str) -> None:
+        paragraph = document.add_paragraph()
+        paragraph.paragraph_format.space_before = Pt(12)
+        paragraph.paragraph_format.space_after = Pt(6)
+        run = paragraph.add_run(text)
+        run.bold = True
+        run.font.name = '微软雅黑'
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
+        run.font.size = Pt(14)
+        run.font.color.rgb = RGBColor(33, 91, 116)
+
+    def add_bullets(items: list[Any]) -> None:
+        for item in items or ['暂无']:
+            paragraph = document.add_paragraph(style=None)
+            paragraph.paragraph_format.left_indent = Inches(0.22)
+            paragraph.paragraph_format.first_line_indent = Inches(-0.12)
+            run = paragraph.add_run(f"• {item}")
+            run.font.name = '微软雅黑'
+            run._element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
+            run.font.size = Pt(10.5)
+
+    def add_simple_table(headers: list[str], rows: list[list[Any]]) -> None:
+        table = document.add_table(rows=1, cols=len(headers))
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.style = 'Table Grid'
+        for index, header in enumerate(headers):
+            set_cell_text(table.rows[0].cells[index], header, bold=True, color='FFFFFF')
+            set_cell_shading(table.rows[0].cells[index], '2F5D73')
+        for row in rows or [['暂无数据'] + [''] * (len(headers) - 1)]:
+            cells = table.add_row().cells
+            for index, value in enumerate(row[: len(headers)]):
+                set_cell_text(cells[index], value)
+
+    title = '商机市场 AI 分析报告' if kind == 'cargo' else '新造船市场 AI 分析报告'
+    document = Document()
+    section = document.sections[0]
+    section.top_margin = Inches(0.75)
+    section.bottom_margin = Inches(0.75)
+    section.left_margin = Inches(0.75)
+    section.right_margin = Inches(0.75)
+
+    paragraph = document.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = paragraph.add_run(title)
+    run.bold = True
+    run.font.name = '微软雅黑'
+    run._element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
+    run.font.size = Pt(22)
+    run.font.color.rgb = RGBColor(33, 91, 116)
+
+    info_rows = [
+        ['生成时间', report.get('generated_at', datetime.now().isoformat(timespec='seconds'))],
+        ['分析口径', '用户自选时间范围'],
+        ['报告类型', '商机成交价趋势' if kind == 'cargo' else '新造船状态追踪'],
+    ]
+    add_simple_table(['项目', '内容'], info_rows)
+
+    add_heading('一、AI 分析结论')
+    paragraph = document.add_paragraph(str(report.get('summary') or '暂无结论'))
+    paragraph.paragraph_format.first_line_indent = Pt(21)
+
+    add_heading('二、关键发现')
+    add_bullets(report.get('key_findings') or [])
+
+    add_heading('三、风险提示')
+    add_bullets(report.get('risks') or [])
+
+    add_heading('四、经营建议')
+    add_bullets(report.get('recommendations') or [])
+
+    stats_rows = []
+    for key, value in (report.get('source_stats') or {}).items():
+        stats_rows.append([key, json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else value])
+    add_heading('五、来源统计')
+    add_simple_table(['指标', '值'], stats_rows)
+
+    detail_rows = report.get('detail_rows') or report.get('trend_points') or []
+    if detail_rows:
+        headers = ['日期/月', '货品/船名', '航线/船厂', '价格/阶段', '备注']
+        rows = []
+        for row in detail_rows[:30]:
+            if kind == 'cargo':
+                rows.append([row.get('deal_date') or row.get('month'), row.get('cargo'), row.get('route'), row.get('price'), row.get('competitor_price') or row.get('remark')])
+            else:
+                rows.append([row.get('status_update_date'), row.get('ship_name') or row.get('owner'), row.get('shipyard'), row.get('stage'), row.get('status_note')])
+        add_heading('六、趋势/状态明细')
+        add_simple_table(headers, rows)
+
+    output = io.BytesIO()
+    document.save(output)
+    output.seek(0)
+    return output
+
+
+def market_extract_json(kind: str, text: str) -> dict[str, Any] | None:
+    config = load_config()
+    if not config.get('base_url') or not config.get('api_key') or not config.get('model'):
+        return None
+    if kind == 'cargo':
+        schema = {
+            'board_type': '长期货盘或即时货盘',
+            'segment': '内贸化、内贸油或外贸',
+            'cargo_name': '',
+            'tonnage': '',
+            'load_port': '',
+            'discharge_port': '',
+            'laycan': '',
+            'cargo_owner': '',
+            'cargo_date': '',
+            'source': '',
+            'remark': '',
+        }
+    else:
+        schema = {
+            'stage': '已完造并出厂投运、合同签订未开造、预计2027年完造出厂、预计2028年完造出厂、信息待获取',
+            'ship_name': '',
+            'update_date': '',
+            'shipyard': '',
+            'owner': '',
+            'dwt': '',
+            'build_status': '',
+            'delivery_time': '',
+            'contract_date': '',
+            'contract_price': '',
+            'ship_type': '',
+            'source': '',
+            'remark': '',
+        }
+    prompt = json.dumps({'text': text[:12000], 'schema': schema}, ensure_ascii=False)
+    try:
+        content = call_chat_completion(
+            config,
+            system_prompt='你是市场情报结构化抽取助手，只返回严格 JSON 对象，不要 Markdown。',
+            user_prompt=prompt,
+            temperature=0,
+        )
+        return parse_json_text(content)
+    except HTTPException:
+        return None
+
+
+def guess_market_cargo(text: str) -> dict[str, Any]:
+    record: dict[str, Any] = {'raw_text': text, 'cargo_date': today_text(), 'source': '手动录入'}
+    tonnage_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:吨|t|T)', text)
+    if tonnage_match:
+        record['tonnage'] = f"{tonnage_match.group(1)}吨"
+    route_match = re.search(r'([\u4e00-\u9fa5A-Za-z0-9·（）()]{2,20})\s*[~～\-—→至到]\s*([\u4e00-\u9fa5A-Za-z0-9·（）()]{2,20})', text)
+    if route_match:
+        record['load_port'] = route_match.group(1).strip()
+        record['discharge_port'] = route_match.group(2).strip()
+    cargo_match = re.search(r'(?:\d+(?:\.\d+)?\s*(?:吨|t|T)\s*)?([\u4e00-\u9fa5A-Za-z0-9]{2,18})(?:，|,|、|\s)', text)
+    if cargo_match:
+        record['cargo_name'] = cargo_match.group(1).strip()
+    owner_match = re.search(r'([\u4e00-\u9fa5A-Za-z0-9]{2,18})(?:的计划|计划|货盘)', text)
+    if owner_match:
+        record['cargo_owner'] = owner_match.group(1).strip()
+    if '月内' in text:
+        record['laycan'] = '月内装出'
+    elif '月底' in text:
+        record['laycan'] = '月底前'
+    if any(word in text for word in ['外贸', '出口', '进口', '境外']):
+        record['segment'] = '外贸'
+    elif any(word in text for word in ['油', '柴油', '汽油', '燃料油', '成品油']):
+        record['segment'] = '内贸油'
+    else:
+        record['segment'] = '内贸化'
+    record['board_type'] = '长期货盘' if any(word in text for word in ['长期', '年度', '月度', '包运']) else '即时货盘'
+    return record
+
+
+def guess_market_newbuilding(text: str) -> dict[str, Any]:
+    record: dict[str, Any] = {'raw_text': text, 'update_date': today_text(), 'source': '手动录入'}
+    dwt_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:万)?\s*(?:载重吨|DWT|dwt|吨级)', text)
+    if dwt_match:
+        record['dwt'] = dwt_match.group(0)
+    year_match = re.search(r'(2027|2028)\s*年', text)
+    if year_match:
+        record['delivery_time'] = f'{year_match.group(1)}年'
+        record['stage'] = f'预计{year_match.group(1)}年完造出厂'
+    elif any(word in text for word in ['交付', '投运', '出厂']):
+        record['stage'] = '已完造并出厂投运'
+    elif any(word in text for word in ['签订', '合同', '订单']):
+        record['stage'] = '合同签订未开造'
+    else:
+        record['stage'] = '信息待获取'
+    yard_match = re.search(r'([\u4e00-\u9fa5A-Za-z0-9·（）()]{2,24}(?:船厂|造船|重工|船舶))', text)
+    if yard_match:
+        record['shipyard'] = yard_match.group(1)
+    owner_match = re.search(r'(?:船东|订造方|owner)[：:\s]*([\u4e00-\u9fa5A-Za-z0-9·（）()]{2,24})', text, re.I)
+    if owner_match:
+        record['owner'] = owner_match.group(1)
+    ship_match = re.search(r'(?:船名|命名为|名为)[：:\s]*([\u4e00-\u9fa5A-Za-z0-9·（）()#-]{2,24})', text)
+    if ship_match:
+        record['ship_name'] = ship_match.group(1)
+    if '化学品' in text:
+        record['ship_type'] = '化学品船'
+    elif '油' in text:
+        record['ship_type'] = '油船'
+    return record
+
+
+def extract_market_record(kind: str, text: str) -> dict[str, Any]:
+    ai_data = market_extract_json(kind, text)
+    guessed = ai_data if isinstance(ai_data, dict) else (guess_market_cargo(text) if kind == 'cargo' else guess_market_newbuilding(text))
+    guessed['raw_text'] = text
+    return normalize_market_record(kind, guessed)
+
+
+def build_market_workbook(kind: str, records: list[dict[str, Any]], stats: dict[str, Any]) -> BytesIO:
+    fields = MARKET_CARGO_FIELDS if kind == 'cargo' else MARKET_NEWBUILDING_FIELDS
+    title = '商机收集台账' if kind == 'cargo' else '新造船收集台账'
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = title
+    sheet['A1'] = title
+    sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(fields) + 1)
+    sheet['A2'] = '生成时间'
+    sheet['B2'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+    sheet['C2'] = '记录数'
+    sheet['D2'] = stats.get('total', len(records))
+    for col_index, header in enumerate(['序号'] + [label for _, label in fields], start=1):
+        sheet.cell(4, col_index, header)
+    for row_index, record in enumerate(records, start=5):
+        sheet.cell(row_index, 1, row_index - 4)
+        for col_index, (key, _) in enumerate(fields, start=2):
+            sheet.cell(row_index, col_index, record.get(key, ''))
+    apply_plain_table_style(sheet, max(4, 4 + len(records)), len(fields) + 1)
+    autosize_sheet(sheet, {1: 8, 2: 16, 3: 16, 4: 18, 5: 14, 6: 16, 7: 16, 8: 18, 9: 18, 10: 16, 11: 16, 12: 18, 13: 18, 14: 18, 15: 18, 16: 18, 17: 28, 18: 28})
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
 @app.get('/')
 def root() -> RedirectResponse:
     return RedirectResponse(url='/login', status_code=302)
@@ -1983,6 +2862,103 @@ def delete_project(project_id: str, _: dict[str, Any] = Depends(require_auth)) -
         raise HTTPException(status_code=404, detail='项目不存在。')
     path.unlink()
     return {'ok': True}
+
+
+@app.post('/api/market-skill/extract')
+def market_skill_extract(payload: MarketExtractPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    kind = payload.kind.strip()
+    if kind not in MARKET_KINDS:
+        raise HTTPException(status_code=400, detail='市场情报类型无效。')
+    return {'record': extract_market_record(kind, payload.text)}
+
+
+@app.post('/api/market-skill/report')
+def market_skill_report(payload: MarketReportPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    return build_market_report(payload)
+
+
+@app.get('/api/market-skill/{kind}')
+def market_skill_list(
+    kind: str,
+    q: str = '',
+    segment: str = '',
+    board_type: str = '',
+    status: str = '',
+    stage: str = '',
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    items, stats = list_market_records(kind, q=q, segment=segment, board_type=board_type, status=status, stage=stage)
+    return {'items': items, 'stats': stats}
+
+
+@app.post('/api/market-skill/{kind}')
+def market_skill_create(kind: str, payload: MarketRecordPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    record = save_market_record(kind, payload.record)
+    return {'record': record}
+
+
+@app.get('/api/market-skill/{kind}/{record_id}')
+def market_skill_get(kind: str, record_id: str, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    return {'record': load_market_record(kind, record_id)}
+
+
+@app.put('/api/market-skill/{kind}/{record_id}')
+def market_skill_update(kind: str, record_id: str, payload: MarketRecordPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    existing = load_market_record(kind, record_id)
+    record = save_market_record(kind, payload.record, record_id=record_id, created_at=existing.get('created_at', ''))
+    return {'record': record}
+
+
+@app.delete('/api/market-skill/{kind}/{record_id}')
+def market_skill_delete(kind: str, record_id: str, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    path = market_record_path(kind, record_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail='市场情报记录不存在。')
+    path.unlink()
+    return {'ok': True}
+
+
+@app.post('/api/export/market-skill')
+def export_market_skill(payload: MarketExportPayload, _: dict[str, Any] = Depends(require_auth)) -> StreamingResponse:
+    kind = payload.kind.strip()
+    items, stats = list_market_records(
+        kind,
+        q=payload.q,
+        segment=payload.segment,
+        board_type=payload.board_type,
+        status=payload.status,
+        stage=payload.stage,
+    )
+    output = build_market_workbook(kind, items, stats)
+    prefix = 'cargo_opportunities' if kind == 'cargo' else 'newbuildings'
+    filename = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post('/api/export/market-skill-report')
+def export_market_skill_report(payload: MarketReportExportPayload, _: dict[str, Any] = Depends(require_auth)) -> StreamingResponse:
+    kind = payload.kind.strip()
+    if kind not in MARKET_KINDS:
+        raise HTTPException(status_code=400, detail='市场情报类型无效。')
+    report = payload.report or {}
+    prefix = 'cargo_market_report' if kind == 'cargo' else 'newbuilding_market_report'
+    if payload.format == 'xlsx':
+        output = build_market_report_workbook(kind, report)
+        filename = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        media_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    else:
+        output = build_market_report_docx(kind, report)
+        filename = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
+        media_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    return StreamingResponse(
+        output,
+        media_type=media_type,
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post('/api/parse')

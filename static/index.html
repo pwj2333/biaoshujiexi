@@ -16,7 +16,8 @@
         </section>
 
         <nav class="side-nav">
-          <button class="nav-link active" data-target="overviewPanel">解析总览</button>
+          <button class="nav-link active" data-target="marketSkillPanel">市场情报</button>
+          <button class="nav-link" data-target="overviewPanel">解析总览</button>
           <button class="nav-link" data-target="trackingPanel">项目跟踪</button>
           <button class="nav-link" data-target="extractionPanel">摘取结果</button>
           <button class="nav-link" data-target="registerPanel">登记预览</button>
@@ -270,6 +271,122 @@
           <div class="chat-compose">
             <textarea id="chatInput" rows="3" placeholder="例如：本项目的投标截止时间是什么？保证金如何缴纳？"></textarea>
             <button id="sendChatBtn" class="primary">发送</button>
+          </div>
+        </section>
+
+        <section id="marketSkillPanel" class="content-panel hidden">
+          <div class="panel-head">
+            <div>
+              <h3>市场情报</h3>
+              <p>独立新增模块，不改原标书解析。商机和新造船数据单独保存到 data/market_skill，可查询、维护、导出。</p>
+            </div>
+            <div class="button-row">
+              <button id="marketExportBtn" class="primary">导出台账 Excel</button>
+            </div>
+          </div>
+
+          <div class="market-tabs">
+            <button id="marketCargoTab" class="market-tab active" data-kind="cargo">商机收集</button>
+            <button id="marketNewbuildingTab" class="market-tab" data-kind="newbuilding">新造船收集</button>
+          </div>
+
+          <details class="tracking-card market-analysis-card">
+            <summary class="tracking-head market-analysis-summary">
+              <div>
+                <h4 id="marketAnalysisTitle">商机市场分析</h4>
+                <span class="card-note">基于当前台账筛选生成，商机只统计“已成交 + 有成交价”的样本。</span>
+              </div>
+              <div class="button-row compact-actions">
+                <button id="marketGenerateReportBtn" class="primary">生成报告</button>
+                <button id="marketReportExportBtn">导出 AI 分析 Word</button>
+              </div>
+            </summary>
+            <div class="form-grid market-report-filters">
+              <label class="field">
+                <span>开始日期</span>
+                <input id="marketReportStart" type="date" />
+              </label>
+              <label class="field">
+                <span>结束日期</span>
+                <input id="marketReportEnd" type="date" />
+              </label>
+              <label class="field field-span-2">
+                <span>AI 分析提示词（可修改）</span>
+                <textarea id="marketReportPrompt" rows="4" placeholder="例如：请重点分析成交价走势、竞对价格、丢单原因，并给出下周经营建议。"></textarea>
+              </label>
+            </div>
+            <div id="marketAnalysis" class="market-analysis"></div>
+          </details>
+
+          <div class="market-grid">
+            <div class="market-left">
+              <details class="tracking-card market-filter-card">
+                <summary class="tracking-head market-filter-summary">
+                  <h4>查询与统计</h4>
+                  <span id="marketCount" class="pill neutral">0 条</span>
+                </summary>
+                <div class="form-grid">
+                  <label class="field">
+                    <span>关键字</span>
+                    <input id="marketSearch" placeholder="航线、货品、货主、船厂、船东" />
+                  </label>
+                  <label class="field market-cargo-filter">
+                    <span>货盘类型</span>
+                    <select id="marketBoardType">
+                      <option value="">全部</option>
+                      <option value="长期货盘">长期货盘</option>
+                      <option value="即时货盘">即时货盘</option>
+                    </select>
+                  </label>
+                  <label class="field market-cargo-filter">
+                    <span>业务板块</span>
+                    <select id="marketSegment">
+                      <option value="">全部</option>
+                      <option value="内贸化">内贸化</option>
+                      <option value="内贸油">内贸油</option>
+                      <option value="外贸">外贸</option>
+                    </select>
+                  </label>
+                  <label class="field market-cargo-filter">
+                    <span>成交状态</span>
+                    <select id="marketStatus">
+                      <option value="">全部</option>
+                      <option value="跟进中">跟进中</option>
+                      <option value="已成交">已成交</option>
+                      <option value="未成交">未成交</option>
+                      <option value="放弃">放弃</option>
+                    </select>
+                  </label>
+                </div>
+                <div id="marketStats" class="history-stats"></div>
+              </details>
+
+              <section class="tracking-card market-ledger-card">
+                <div class="tracking-head">
+                  <h4 id="marketLedgerTitle">商机台账</h4>
+                  <span class="card-note">点击记录可回填右侧表单继续编辑</span>
+                </div>
+                <div id="marketList" class="project-list ledger-list"></div>
+              </section>
+            </div>
+
+            <section class="tracking-card market-editor-card">
+              <div class="tracking-head">
+                <h4 id="marketFormTitle">商机录入</h4>
+                <span id="marketSaveStatus" class="pill neutral">独立归档</span>
+              </div>
+              <label class="field">
+                <span>粘贴文本 / 邮件正文 / 资讯内容</span>
+                <textarea id="marketRawText" rows="5" placeholder="例如：4000吨甲苯，张家港～东莞，要求月内装出，远大的计划"></textarea>
+              </label>
+              <div class="button-row">
+                <button id="marketExtractBtn">AI识别填表</button>
+                <button id="marketNewBtn">新建空白</button>
+                <button id="marketSaveBtn" class="primary">保存记录</button>
+                <button id="marketDeleteBtn" class="ghost danger">删除当前</button>
+              </div>
+              <div id="marketForm" class="form-grid market-form"></div>
+            </section>
           </div>
         </section>
 

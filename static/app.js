@@ -29,6 +29,13 @@ const state = {
     our_quote_rows: 0,
     competitor_quote_rows: 0,
   },
+  marketKind: 'cargo',
+  marketCurrentId: '',
+  marketRecord: {},
+  marketItems: [],
+  marketStats: {},
+  marketRequestSeq: 0,
+  marketReport: null,
 };
 
 const presets = {
@@ -81,7 +88,79 @@ const timelineColumns = [
   { key: 'note', label: '内容', type: 'textarea' },
 ];
 
+const marketCargoFields = [
+  { key: 'board_type', label: '货盘类型', type: 'select', options: ['长期货盘', '即时货盘'] },
+  { key: 'segment', label: '业务板块', type: 'select', options: ['内贸化', '内贸油', '外贸'] },
+  { key: 'cargo_name', label: '货品名称' },
+  { key: 'tonnage', label: '货物吨数' },
+  { key: 'load_port', label: '装港' },
+  { key: 'discharge_port', label: '卸港' },
+  { key: 'laycan', label: '装载期' },
+  { key: 'cargo_owner', label: '货主/租家' },
+  { key: 'cargo_date', label: '货盘日期' },
+  { key: 'source', label: '货盘来源' },
+  { key: 'status', label: '是否达成合作', type: 'select', options: ['跟进中', '已成交', '未成交', '放弃'] },
+  { key: 'final_price', label: '成交价' },
+  { key: 'deal_date', label: '成交日期', type: 'date' },
+  { key: 'deal_price', label: '最终成交价格' },
+  { key: 'price_unit', label: '价格单位' },
+  { key: 'currency', label: '币种', type: 'select', options: ['CNY', 'USD'] },
+  { key: 'route', label: '航线' },
+  { key: 'cargo_standard_name', label: '货品标准名' },
+  { key: 'market_info', label: '市场了解信息', type: 'textarea' },
+  { key: 'loss_reason', label: '未达成/放弃原因', type: 'textarea' },
+  { key: 'competitor_name', label: '竞争对手' },
+  { key: 'competitor_price', label: '竞争对手价格' },
+  { key: 'remark', label: '备注', type: 'textarea' },
+];
+
+const marketNewbuildingFields = [
+  { key: 'stage', label: '建造阶段', type: 'select', options: ['已完造并出厂投运', '合同签订未开造', '预计2027年完造出厂', '预计2028年完造出厂', '信息待获取'] },
+  { key: 'ship_name', label: '船名' },
+  { key: 'update_date', label: '更新日期' },
+  { key: 'shipyard', label: '造船厂' },
+  { key: 'owner', label: '船东' },
+  { key: 'dwt', label: '载重吨DWT' },
+  { key: 'build_status', label: '当前建造状态' },
+  { key: 'delivery_time', label: '预计交付时间' },
+  { key: 'actual_delivery_date', label: '实际出厂时间', type: 'date' },
+  { key: 'status_update_date', label: '状态更新时间', type: 'date' },
+  { key: 'status_note', label: '状态变化备注', type: 'textarea' },
+  { key: 'contract_date', label: '合同签订日期' },
+  { key: 'contract_price', label: '新造船合同价格' },
+  { key: 'ship_type', label: '船型' },
+  { key: 'source', label: '信息来源' },
+  { key: 'remark', label: '备注', type: 'textarea' },
+];
+
 const $ = (id) => document.getElementById(id);
+
+function bindClick(id, handler) {
+  const node = $(id);
+  if (node) {
+    node.onclick = handler;
+  }
+  return node;
+}
+
+function bindChange(id, handler) {
+  const node = $(id);
+  if (node) {
+    node.onchange = handler;
+  }
+  return node;
+}
+
+function bindInput(id, handler, syncChange = false) {
+  const node = $(id);
+  if (node) {
+    node.oninput = handler;
+    if (syncChange) {
+      node.onchange = handler;
+    }
+  }
+  return node;
+}
 
 async function request(url, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -135,19 +214,24 @@ function clearAuth() {
 
 function renderCurrentUser() {
   const user = state.currentUser;
-  $('userNavBtn').classList.toggle('hidden', user?.role !== 'admin');
+  const userNavBtn = $('userNavBtn');
+  if (userNavBtn) {
+    userNavBtn.classList.toggle('hidden', user?.role !== 'admin');
+  }
 }
 
 function renderUserList() {
+  const userList = $('userList');
+  if (!userList) return;
   if (!state.currentUser || state.currentUser.role !== 'admin') {
-    $('userList').innerHTML = `<div class="project-empty">只有管理员可以查看账号列表</div>`;
+    userList.innerHTML = `<div class="project-empty">只有管理员可以查看账号列表</div>`;
     return;
   }
   if (!state.users.length) {
-    $('userList').innerHTML = `<div class="project-empty">暂无账号</div>`;
+    userList.innerHTML = `<div class="project-empty">暂无账号</div>`;
     return;
   }
-  $('userList').innerHTML = `
+  userList.innerHTML = `
     <table class="dense-table">
       <thead><tr><th>用户名</th><th>显示名称</th><th>角色</th><th>创建时间</th></tr></thead>
       <tbody>
@@ -196,6 +280,10 @@ function normalizeText(value) {
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 }
 
 function emptyResult() {
@@ -661,6 +749,455 @@ function renderProjectList() {
   });
 }
 
+function marketFields() {
+  return state.marketKind === 'cargo' ? marketCargoFields : marketNewbuildingFields;
+}
+
+function emptyMarketRecord(kind = state.marketKind) {
+  return kind === 'cargo'
+    ? {
+        board_type: '即时货盘',
+        segment: '内贸化',
+        cargo_name: '',
+        tonnage: '',
+        load_port: '',
+        discharge_port: '',
+        laycan: '',
+        cargo_owner: '',
+        cargo_date: new Date().toISOString().slice(0, 10),
+        source: '手动录入',
+        status: '跟进中',
+        final_price: '',
+        deal_date: '',
+        deal_price: '',
+        price_unit: '元/吨',
+        currency: 'CNY',
+        route: '',
+        cargo_standard_name: '',
+        market_info: '',
+        loss_reason: '',
+        competitor_name: '',
+        competitor_price: '',
+        remark: '',
+        raw_text: '',
+      }
+    : {
+        stage: '信息待获取',
+        ship_name: '',
+        update_date: new Date().toISOString().slice(0, 10),
+        shipyard: '',
+        owner: '',
+        dwt: '',
+        build_status: '',
+        delivery_time: '',
+        actual_delivery_date: '',
+        status_update_date: new Date().toISOString().slice(0, 10),
+        status_note: '',
+        contract_date: '',
+        contract_price: '',
+        ship_type: '',
+        source: '手动录入',
+        remark: '',
+        raw_text: '',
+      };
+}
+
+function setMarketRecord(record = null, { persisted = false } = {}) {
+  state.marketRecord = { ...emptyMarketRecord(), ...(record || {}) };
+  state.marketCurrentId = persisted ? record?.id || '' : '';
+  if ($('marketRawText')) $('marketRawText').value = state.marketRecord.raw_text || '';
+  if ($('marketReportPrompt') && !$('marketReportPrompt').value.trim()) $('marketReportPrompt').value = defaultMarketPrompt();
+  renderMarketForm();
+  setStatus('marketSaveStatus', state.marketCurrentId ? '已加载记录' : '新记录', state.marketCurrentId ? 'ok' : 'neutral');
+}
+
+function marketInputMarkup(field, value) {
+  if (field.type === 'select') {
+    return `
+      <select data-type="market-field" data-key="${field.key}">
+        ${field.options.map((option) => `<option value="${option}" ${option === value ? 'selected' : ''}>${option}</option>`).join('')}
+      </select>
+    `;
+  }
+  if (field.type === 'textarea') {
+    return `<textarea data-type="market-field" data-key="${field.key}" rows="3">${value || ''}</textarea>`;
+  }
+  return `<input data-type="market-field" data-key="${field.key}" value="${value || ''}" ${field.type === 'date' ? 'type="date"' : ''} />`;
+}
+
+function renderMarketForm() {
+  if (!$('marketForm')) return;
+  $('marketFormTitle').textContent = state.marketKind === 'cargo' ? '商机录入' : '新造船录入';
+  $('marketLedgerTitle').textContent = state.marketKind === 'cargo' ? '商机台账' : '新造船台账';
+  $('marketForm').innerHTML = marketFields()
+    .map((field) => {
+      const spanClass = field.type === 'textarea' ? ' field-span-2' : '';
+      return `
+        <label class="field${spanClass}">
+          <span>${field.label}</span>
+          ${marketInputMarkup(field, state.marketRecord[field.key])}
+        </label>
+      `;
+    })
+    .join('');
+  document.querySelectorAll("[data-type='market-field']").forEach((node) => {
+    const handler = (event) => {
+      state.marketRecord[event.target.dataset.key] = event.target.value;
+    };
+    node.oninput = handler;
+    node.onchange = handler;
+  });
+}
+
+function renderMarketFilters() {
+  document.querySelectorAll('.market-tab').forEach((node) => {
+    node.classList.toggle('active', node.dataset.kind === state.marketKind);
+  });
+  document.querySelectorAll('.market-cargo-filter').forEach((node) => {
+    node.classList.toggle('hidden', state.marketKind !== 'cargo');
+  });
+  document.querySelectorAll('.market-newbuilding-filter').forEach((node) => {
+    node.classList.toggle('hidden', state.marketKind !== 'newbuilding');
+  });
+}
+
+function renderMarketStats() {
+  const stats = state.marketStats || {};
+  const pairs =
+    state.marketKind === 'cargo'
+      ? [
+          ['商机总数', stats.total],
+          ['已成交', stats.won],
+          ['未成交/放弃', stats.lost],
+          ['跟进中', stats.tracking],
+          ['已录成交价', stats.with_final_price],
+        ]
+      : [
+          ['新船总数', stats.total],
+          ['已投运', stats['已完造并出厂投运']],
+          ['签约未开造', stats['合同签订未开造']],
+          ['2027交付', stats['预计2027年完造出厂']],
+          ['2028交付', stats['预计2028年完造出厂']],
+          ['信息待获取', stats['信息待获取']],
+        ];
+  $('marketCount').textContent = `${stats.total || 0} 条`;
+  $('marketStats').innerHTML = pairs
+    .map(
+      ([label, value]) => `
+        <article class="history-stat">
+          <span>${label}</span>
+          <strong>${value || 0}</strong>
+        </article>
+      `
+    )
+    .join('');
+}
+
+function numberText(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toLocaleString('zh-CN') : value || '-';
+}
+
+function renderMarketSvg(points) {
+  if (!points.length) {
+    return `<div class="project-empty">暂无可绘制的成交价样本</div>`;
+  }
+  const values = points.map((point) => Number(point.avg_price || point.price)).filter((value) => Number.isFinite(value));
+  if (!values.length) {
+    return `<div class="project-empty">暂无可绘制的成交价样本</div>`;
+  }
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const width = 760;
+  const height = 240;
+  const pad = 36;
+  const span = max - min || 1;
+  const coords = values.map((value, index) => {
+    const x = pad + (index * (width - pad * 2)) / Math.max(values.length - 1, 1);
+    const y = height - pad - ((value - min) * (height - pad * 2)) / span;
+    return [x, y];
+  });
+  const polyline = coords.map(([x, y]) => `${x},${y}`).join(' ');
+  return `
+    <svg class="market-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="成交价走势图">
+      <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" />
+      <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${height - pad}" />
+      <polyline points="${polyline}" />
+      ${coords
+        .map(([x, y], index) => `<circle cx="${x}" cy="${y}" r="4"><title>${escapeHtml(points[index].month || points[index].deal_date || '')} ${escapeHtml(numberText(values[index]))}</title></circle>`)
+        .join('')}
+      <text x="${pad}" y="22">${numberText(max)}</text>
+      <text x="${pad}" y="${height - 8}">${numberText(min)}</text>
+    </svg>
+  `;
+}
+
+function renderMarketReport() {
+  if (!$('marketAnalysis')) return;
+  $('marketAnalysisTitle').textContent = state.marketKind === 'cargo' ? '商机市场分析' : '新造船市场分析';
+  const report = state.marketReport;
+  if (!report) {
+    $('marketAnalysis').innerHTML = `<div class="project-empty">选择时间并点击生成报告后，这里会展示走势图、统计结论和 AI 建议。</div>`;
+    return;
+  }
+  const stats = report.source_stats || {};
+  const statPairs =
+    state.marketKind === 'cargo'
+      ? [
+          ['纳入商机', stats.total],
+          ['成交样本', stats.deal_count],
+          ['平均成交价', stats.avg_price],
+          ['成交率', `${stats.win_rate || 0}%`],
+        ]
+      : [
+          ['新船信息', stats.total],
+          ['已出厂/投运', stats.delivered],
+          ['状态变化', stats.recent_change_count],
+          ['交付年份', (stats.delivery_year_counts || []).length],
+        ];
+  const chartHtml =
+    state.marketKind === 'cargo'
+      ? renderMarketSvg(report.trend_points || [])
+      : `<div class="market-bars">${(stats.stage_counts || [])
+          .map((item) => `<div><span>${escapeHtml(item.name)}</span><strong style="width:${Math.max(8, item.count * 28)}px">${escapeHtml(item.count)}</strong></div>`)
+          .join('') || '<div class="project-empty">暂无阶段统计</div>'}</div>`;
+  const detailRows = report.detail_rows || [];
+  const columns =
+    state.marketKind === 'cargo'
+      ? [
+          ['deal_date', '成交日期'],
+          ['cargo', '货品'],
+          ['route', '航线'],
+          ['price', '成交价'],
+          ['price_unit', '单位'],
+          ['currency', '币种'],
+          ['competitor_price', '竞对价'],
+        ]
+      : [
+          ['status_update_date', '更新时间'],
+          ['ship_name', '船名'],
+          ['shipyard', '船厂'],
+          ['owner', '船东'],
+          ['stage', '阶段'],
+          ['delivery_time', '预计交付'],
+          ['actual_delivery_date', '实际出厂'],
+        ];
+  $('marketAnalysis').innerHTML = `
+    <div class="history-stats market-report-stats">
+      ${statPairs
+        .map(
+          ([label, value]) => `
+            <article class="history-stat">
+              <span>${escapeHtml(label)}</span>
+              <strong>${escapeHtml(value ?? 0)}</strong>
+            </article>
+          `
+        )
+        .join('')}
+    </div>
+    <div class="market-report-layout">
+      <div class="market-chart-card">${chartHtml}</div>
+      <div class="analysis-card">
+        <h4>AI / 规则结论</h4>
+        <p>${escapeHtml(report.summary || '暂无结论')}</p>
+        <h4>关键发现</h4>
+        <ul>${(report.key_findings || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('') || '<li>暂无</li>'}</ul>
+        <h4>风险与建议</h4>
+        <ul>${[...(report.risks || []), ...(report.recommendations || [])].map((item) => `<li>${escapeHtml(item)}</li>`).join('') || '<li>暂无</li>'}</ul>
+      </div>
+    </div>
+    <div class="table-wrap compact-table">
+      <table class="dense-table">
+        <thead><tr>${columns.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join('')}</tr></thead>
+        <tbody>
+          ${detailRows
+            .slice(0, 20)
+            .map((row) => `<tr>${columns.map(([key]) => `<td>${escapeHtml(row[key] ?? '-')}</td>`).join('')}</tr>`)
+            .join('') || `<tr><td colspan="${columns.length}">暂无明细数据</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderMarketList() {
+  renderMarketFilters();
+  renderMarketStats();
+  renderMarketReport();
+  if (!state.marketItems.length) {
+    $('marketList').innerHTML = `<div class="project-empty">暂无匹配记录</div>`;
+    return;
+  }
+  $('marketList').innerHTML = state.marketItems
+    .map((item) => {
+      const title =
+        state.marketKind === 'cargo'
+          ? `${item.cargo_name || '未填写货品'} ${item.load_port || ''} → ${item.discharge_port || ''}`
+          : `${item.ship_name || item.owner || '未命名新船'} ${item.shipyard || ''}`;
+      const chip = state.marketKind === 'cargo' ? item.status : item.stage;
+      const sub =
+        state.marketKind === 'cargo'
+          ? `${item.tonnage || '-'} | ${item.cargo_owner || '-'} | ${item.final_price || '未录成交价'}`
+          : `${item.dwt || '-'} | ${item.owner || '-'} | ${item.delivery_time || '-'}`;
+      return `
+        <button class="project-item ${item.id === state.marketCurrentId ? 'active' : ''}" data-market-id="${item.id}">
+          <div class="project-card-head">
+            <strong>${title}</strong>
+            <span class="status-chip ${chip === '已成交' || chip === '已完造并出厂投运' ? 'ok' : chip === '未成交' || chip === '放弃' ? 'error' : 'warn'}">${chip || '-'}</span>
+          </div>
+          <span>${sub}</span>
+          <div class="project-tags">
+            <span>${state.marketKind === 'cargo' ? item.board_type : item.build_status || '状态待补'}</span>
+            <span>${state.marketKind === 'cargo' ? item.segment : item.ship_type || '船型待补'}</span>
+            <span>${(item.updated_at || '').replace('T', ' ')}</span>
+          </div>
+        </button>
+      `;
+    })
+    .join('');
+  document.querySelectorAll('[data-market-id]').forEach((node) => {
+    node.onclick = async () => {
+      try {
+        const result = await request(`/api/market-skill/${state.marketKind}/${node.dataset.marketId}`);
+        setMarketRecord(result.record, { persisted: true });
+        renderMarketList();
+      } catch (error) {
+        showToast(error.message, true);
+      }
+    };
+  });
+}
+
+function marketFilters() {
+  return {
+    q: $('marketSearch')?.value.trim() || '',
+    board_type: state.marketKind === 'cargo' ? $('marketBoardType')?.value || '' : '',
+    segment: state.marketKind === 'cargo' ? $('marketSegment')?.value || '' : '',
+    status: state.marketKind === 'cargo' ? $('marketStatus')?.value || '' : '',
+  };
+}
+
+function defaultMarketPrompt() {
+  return state.marketKind === 'cargo'
+    ? `请作为油化品航运市场分析师，基于当前筛选周期内的商机台账和成交价样本，形成一份可给经营层阅读的市场分析结论。
+分析要求：
+1. 先说明本次样本口径，包括纳入商机数量、已成交数量、有效成交价样本、主要货品和主要航线。
+2. 只使用“已成交且有最终成交价”的数据判断市场运价走势，不要把意向价、我司报价或竞对报价混入主趋势。
+3. 按货品、航线、月份分析成交均价变化，指出价格上行、下行或样本不足无法判断的原因。
+4. 结合竞对价格和丢单原因，判断客户价格预期、竞争强度、船位匹配、TCE压力等经营风险。
+5. 输出明确的经营建议，包括重点跟进航线/货品、报价策略、客户沟通重点、需要继续补充的数据字段。
+6. 如果样本不足，请明确提示“样本不足”，不要过度推断。`
+    : `请作为油化船新造船市场分析师，基于当前筛选周期内的新造船台账，形成一份可给经营层和投资决策参考的结论性报告。
+分析要求：
+1. 先说明本次样本口径，包括新造船记录数量、已出厂投运数量、签约未开造数量、预计交付年份分布。
+2. 重点分析船舶建造状态变化、实际出厂投运节奏、未来集中交付年份和潜在供给释放压力。
+3. 按船厂、船东、船型、DWT和交付时间识别值得关注的新增供给或延期风险。
+4. 从供给侧变化推导对油化品船运价、船舶投资、租船经营和市场竞争的可能影响。
+5. 输出明确建议，包括需要重点跟踪的船厂/船东、投资节奏建议、市场风险预警、下一阶段需补充的信息。
+6. 如果样本不足，请明确提示“样本不足”，不要编造外部订单或价格信息。`;
+}
+
+function marketReportPayload() {
+  return {
+    kind: state.marketKind,
+    period: 'custom',
+    start_date: $('marketReportStart')?.value || '',
+    end_date: $('marketReportEnd')?.value || '',
+    custom_prompt: $('marketReportPrompt')?.value.trim() || defaultMarketPrompt(),
+    filters: marketFilters(),
+  };
+}
+
+async function loadMarketRecords() {
+  const requestSeq = ++state.marketRequestSeq;
+  const params = new URLSearchParams(marketFilters());
+  const result = await request(`/api/market-skill/${state.marketKind}?${params.toString()}`);
+  if (requestSeq !== state.marketRequestSeq) return;
+  state.marketItems = result.items || [];
+  state.marketStats = result.stats || {};
+  renderMarketList();
+}
+
+let marketSearchTimer = null;
+
+function scheduleMarketRecordsLoad() {
+  clearTimeout(marketSearchTimer);
+  marketSearchTimer = setTimeout(async () => {
+    try {
+      await loadMarketRecords();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  }, 180);
+}
+
+async function extractMarketRecord() {
+  const text = $('marketRawText').value.trim();
+  if (!text) throw new Error('请先粘贴要识别的市场情报文本');
+  const result = await request('/api/market-skill/extract', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: state.marketKind, text }),
+  });
+  setMarketRecord(result.record);
+  showToast('已识别并填入表单，请人工确认后保存');
+}
+
+async function saveMarketRecord() {
+  const rawText = $('marketRawText').value.trim();
+  if (state.marketKind === 'cargo') {
+    state.marketRecord.route = state.marketRecord.route || [state.marketRecord.load_port, state.marketRecord.discharge_port].filter(Boolean).join(' - ');
+    state.marketRecord.cargo_standard_name = state.marketRecord.cargo_standard_name || state.marketRecord.cargo_name || '';
+    state.marketRecord.deal_price = state.marketRecord.deal_price || state.marketRecord.final_price || '';
+  }
+  const payload = { kind: state.marketKind, record: { ...state.marketRecord, raw_text: rawText } };
+  const url = state.marketCurrentId ? `/api/market-skill/${state.marketKind}/${state.marketCurrentId}` : `/api/market-skill/${state.marketKind}`;
+  const result = await request(url, {
+    method: state.marketCurrentId ? 'PUT' : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  setMarketRecord(result.record, { persisted: true });
+  state.marketReport = null;
+  await loadMarketRecords();
+  showToast('市场情报记录已保存');
+}
+
+async function deleteMarketRecord() {
+  if (!state.marketCurrentId) throw new Error('当前没有已保存的市场情报记录');
+  if (!window.confirm('确认删除当前市场情报记录吗？删除后无法恢复。')) return;
+  await request(`/api/market-skill/${state.marketKind}/${state.marketCurrentId}`, { method: 'DELETE' });
+  setMarketRecord();
+  await loadMarketRecords();
+  showToast('市场情报记录已删除');
+}
+
+async function generateMarketReport() {
+  const button = $('marketGenerateReportBtn');
+  const oldText = button?.textContent || '生成报告';
+  try {
+    if (button) {
+      button.disabled = true;
+      button.textContent = 'AI分析中...';
+    }
+    showToast('AI 正在汇总台账、计算趋势并生成分析报告');
+    const report = await request('/api/market-skill/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(marketReportPayload()),
+    });
+    state.marketReport = report;
+    renderMarketReport();
+    document.querySelector('.market-analysis-card')?.setAttribute('open', '');
+    showToast('市场分析报告已生成，可以预览或导出 Word');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = oldText;
+    }
+  }
+}
+
 async function loadProjects() {
   const params = new URLSearchParams(currentHistoryFilters());
   const result = await request(`/api/projects?${params.toString()}`);
@@ -952,41 +1489,84 @@ function bindEvents() {
     node.onclick = () => switchPanel(node.dataset.target);
   });
 
+  document.querySelectorAll('.market-analysis-summary button').forEach((node) => {
+    node.addEventListener('click', (event) => event.stopPropagation());
+  });
+
   ['projectSearch', 'historyYear', 'historyBidStatus', 'historyAwardStatus'].forEach((id) => {
-    $(id).oninput = async () => {
+    const handler = async () => {
       try {
         await loadProjects();
       } catch (error) {
         showToast(error.message, true);
       }
     };
-    $(id).onchange = $(id).oninput;
+    bindInput(id, handler, true);
   });
 
-  $('configPreset').onchange = (event) => applyPreset(event.target.value);
+  ['marketSearch', 'marketBoardType', 'marketSegment', 'marketStatus'].forEach((id) => {
+    bindInput(
+      id,
+      () => {
+        state.marketReport = null;
+        renderMarketReport();
+        scheduleMarketRecordsLoad();
+      },
+      true
+    );
+  });
 
-  $('logoutBtn').onclick = async () => {
+  ['marketReportStart', 'marketReportEnd', 'marketReportPrompt'].forEach((id) => {
+    bindInput(
+      id,
+      () => {
+        state.marketReport = null;
+        renderMarketReport();
+      },
+      true
+    );
+  });
+
+  document.querySelectorAll('.market-tab').forEach((node) => {
+    node.onclick = async () => {
+      state.marketKind = node.dataset.kind;
+      state.marketCurrentId = '';
+      state.marketReport = null;
+      if ($('marketReportPrompt')) $('marketReportPrompt').value = defaultMarketPrompt();
+      setMarketRecord();
+      try {
+        await loadMarketRecords();
+      } catch (error) {
+        showToast(error.message, true);
+      }
+    };
+  });
+
+  bindChange('configPreset', (event) => applyPreset(event.target.value));
+
+  bindClick('logoutBtn', async () => {
     await logout();
-  };
+  });
 
-  $('saveConfigBtn').onclick = async () => {
+  bindClick('saveConfigBtn', async () => {
     try {
       await saveConfig();
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('testConfigBtn').onclick = async () => {
+  bindClick('testConfigBtn', async () => {
     try {
       await testConfig();
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('parseBtn').onclick = async () => {
+  bindClick('parseBtn', async () => {
     const button = $('parseBtn');
+    if (!button) return;
     try {
       button.disabled = true;
       button.textContent = '解析中...';
@@ -998,77 +1578,83 @@ function bindEvents() {
       button.disabled = false;
       button.textContent = '开始解析';
     }
-  };
+  });
 
-  $('saveProjectBtn').onclick = async () => {
+  bindClick('saveProjectBtn', async () => {
     try {
       await saveCurrentProject();
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('deleteProjectBtn').onclick = async () => {
+  bindClick('deleteProjectBtn', async () => {
     try {
       await deleteCurrentProject();
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('registerMode').onchange = () => {
-    state.registerMode = $('registerMode').value;
+  bindChange('registerMode', () => {
+    const registerMode = $('registerMode');
+    if (!registerMode) return;
+    state.registerMode = registerMode.value;
     if (!$('resultSection').classList.contains('hidden')) {
       renderRegister();
       bindDynamicEditors();
     }
-  };
+  });
 
-  $('sheetName').oninput = () => {
-    state.followUp.register_year = $('sheetName').value.trim();
-  };
+  bindInput('sheetName', () => {
+    const sheetName = $('sheetName');
+    if (!sheetName) return;
+    state.followUp.register_year = sheetName.value.trim();
+  });
 
-  $('addOurQuoteBtn').onclick = () => {
+  bindClick('addOurQuoteBtn', () => {
     state.ourQuotes.push(newQuote('我司'));
     renderTracking();
     bindDynamicEditors();
     renderSummary(state.documentSummary);
-  };
+  });
 
-  $('addCompetitorQuoteBtn').onclick = () => {
+  bindClick('addCompetitorQuoteBtn', () => {
     state.competitorQuotes.push(newQuote(''));
     renderTracking();
     bindDynamicEditors();
     renderSummary(state.documentSummary);
-  };
+  });
 
-  $('addTimelineBtn').onclick = () => {
+  bindClick('addTimelineBtn', () => {
     state.timeline.push(newTimeline());
     renderTracking();
     bindDynamicEditors();
-  };
+  });
 
-  $('sendChatBtn').onclick = async () => {
-    const question = $('chatInput').value.trim();
+  bindClick('sendChatBtn', async () => {
+    const chatInput = $('chatInput');
+    if (!chatInput) return;
+    const question = chatInput.value.trim();
     if (!question) return;
-    $('chatInput').value = '';
+    chatInput.value = '';
     try {
       await sendChat(question);
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('askDefaultBtn').onclick = async () => {
+  bindClick('askDefaultBtn', async () => {
     try {
       await sendChat('请重新总结这份标书的关键节点、资格要求、报价要求、评标标准和主要风险。');
       switchPanel('chatPanel');
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('exportOverviewBtn').onclick = async () => {
+  bindClick('exportOverviewBtn', async () => {
     try {
       await downloadFile(
         '/api/export/overview',
@@ -1085,25 +1671,25 @@ function bindEvents() {
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('exportExtractionBtn').onclick = async () => {
+  bindClick('exportExtractionBtn', async () => {
     try {
       await downloadFile('/api/export/extraction', { result: collectResultPayload() }, '标书摘取.xlsx');
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('exportRegisterBtn').onclick = async () => {
+  bindClick('exportRegisterBtn', async () => {
     try {
       await downloadFile('/api/export/register', { rows: currentRegisterRows(), sheet_name: $('sheetName').value }, '招标登记.xlsx');
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('exportOurQuotesBtn').onclick = async () => {
+  bindClick('exportOurQuotesBtn', async () => {
     try {
       await downloadFile(
         '/api/export/our-quotes',
@@ -1117,9 +1703,9 @@ function bindEvents() {
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('exportCompetitorQuotesBtn').onclick = async () => {
+  bindClick('exportCompetitorQuotesBtn', async () => {
     try {
       await downloadFile(
         '/api/export/competitor-quotes',
@@ -1133,31 +1719,94 @@ function bindEvents() {
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('exportLedgerBtn').onclick = async () => {
+  bindClick('exportLedgerBtn', async () => {
     try {
       await downloadFile('/api/export/ledger', currentHistoryFilters(), '历史台账汇总.xlsx');
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('createUserBtn').onclick = async () => {
+  bindClick('marketExtractBtn', async () => {
+    try {
+      await extractMarketRecord();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  bindClick('marketNewBtn', () => {
+    setMarketRecord();
+  });
+
+  bindClick('marketSaveBtn', async () => {
+    try {
+      await saveMarketRecord();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  bindClick('marketDeleteBtn', async () => {
+    try {
+      await deleteMarketRecord();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  bindClick('marketExportBtn', async () => {
+    try {
+      await downloadFile(
+        '/api/export/market-skill',
+        { kind: state.marketKind, ...marketFilters() },
+        state.marketKind === 'cargo' ? '商机收集台账.xlsx' : '新造船收集台账.xlsx'
+      );
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  bindClick('marketGenerateReportBtn', async () => {
+    try {
+      await generateMarketReport();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  bindClick('marketReportExportBtn', async () => {
+    try {
+      if (!state.marketReport) {
+        await generateMarketReport();
+      }
+      await downloadFile(
+        '/api/export/market-skill-report',
+        { kind: state.marketKind, report: state.marketReport, format: 'docx' },
+        state.marketKind === 'cargo' ? '商机市场AI分析报告.docx' : '新造船市场AI分析报告.docx'
+      );
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  bindClick('createUserBtn', async () => {
     try {
       await createUser();
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 
-  $('refreshUsersBtn').onclick = async () => {
+  bindClick('refreshUsersBtn', async () => {
     try {
       await loadUsers();
     } catch (error) {
       showToast(error.message, true);
     }
-  };
+  });
 }
 
 async function init() {
@@ -1173,11 +1822,13 @@ async function init() {
     await loadMeta();
     await loadConfig();
     clearCurrentProject();
+    setMarketRecord();
     await loadProjects();
+    await loadMarketRecords();
     if (state.currentUser?.role === 'admin') {
       await loadUsers();
     }
-    switchPanel('overviewPanel');
+    switchPanel('marketSkillPanel');
   } catch (error) {
     if (!state.authToken) {
       window.location.href = '/login';
