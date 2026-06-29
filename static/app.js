@@ -1277,6 +1277,7 @@ async function loadConfig() {
   if ($('feishuCallbackUrl')) {
     $('feishuCallbackUrl').value = `${window.location.origin}/api/feishu/events`;
     $('feishuEnabled').checked = Boolean(config.feishu_enabled);
+    $('feishuReceiveMode').value = config.feishu_receive_mode || 'ws';
     $('feishuAppId').value = config.feishu_app_id || '';
     $('feishuAppSecret').value = '';
     $('feishuVerificationToken').value = '';
@@ -1293,6 +1294,7 @@ function readConfigForm() {
     model: $('modelName').value.trim(),
     temperature: Number($('temperature').value || 0.1),
     feishu_enabled: Boolean($('feishuEnabled')?.checked),
+    feishu_receive_mode: $('feishuReceiveMode')?.value || 'ws',
     feishu_app_id: $('feishuAppId')?.value.trim() || '',
     feishu_app_secret: $('feishuAppSecret')?.value.trim() || '',
     feishu_verification_token: $('feishuVerificationToken')?.value.trim() || '',

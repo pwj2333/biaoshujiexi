@@ -3,10 +3,12 @@ from __future__ import annotations
 import io
 import json
 import base64
+import asyncio
 import hashlib
 import hmac
 import re
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -18,6 +20,13 @@ from zipfile import BadZipFile, ZipFile
 
 import httpx
 import uvicorn
+try:
+    import lark_oapi as lark
+    import lark_oapi.ws.client as lark_ws_client
+    from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
+except ImportError:
+    lark = lark_ws_client = None
+    P2ImMessageReceiveV1 = None
 try:
     from cryptography.hazmat.primitives import padding
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -73,6 +82,11 @@ for folder in (DATA_DIR, TMP_DIR, PROJECTS_DIR, MARKET_SKILL_DIR, FEISHU_DIR, FE
 app = FastAPI(title='标书解析与登记 Demo')
 app.mount('/static', StaticFiles(directory=STATIC_DIR), name='static')
 
+
+@app.on_event('startup')
+def startup_feishu_ws() -> None:
+    start_feishu_ws_client()
+
 EXTRACTION_FIELDS = [
     {'key': 'open_time', 'label': '开标时间', 'cell': 'B2'},
     {'key': 'submission_method', 'label': '投标文件递交方式', 'cell': 'B3'},
@@ -113,6 +127,7 @@ DEFAULT_CONFIG = {
     'model': '',
     'temperature': 0.1,
     'feishu_enabled': False,
+    'feishu_receive_mode': 'ws',
     'feishu_app_id': '',
     'feishu_app_secret': '',
     'feishu_verification_token': '',
@@ -122,6 +137,8 @@ DEFAULT_CONFIG = {
 }
 
 FEISHU_TOKEN_CACHE: dict[str, Any] = {'token': '', 'expires_at': 0.0}
+FEISHU_WS_THREAD: threading.Thread | None = None
+FEISHU_WS_STARTED_FOR = ''
 FEISHU_TOOL_NAMES = {
     'help',
     'search_project',
@@ -389,6 +406,7 @@ class ConfigPayload(BaseModel):
     model: str = ''
     temperature: float = 0.1
     feishu_enabled: bool = False
+    feishu_receive_mode: str = 'ws'
     feishu_app_id: str = ''
     feishu_app_secret: str = ''
     feishu_verification_token: str = ''
@@ -531,6 +549,7 @@ def save_config(payload: dict[str, Any]) -> dict[str, Any]:
         'model': payload.get('model', '').strip(),
         'temperature': float(payload.get('temperature', 0.1) or 0.1),
         'feishu_enabled': bool(payload.get('feishu_enabled')),
+        'feishu_receive_mode': payload.get('feishu_receive_mode', 'ws').strip() if payload.get('feishu_receive_mode') in {'ws', 'http'} else 'ws',
         'feishu_app_id': payload.get('feishu_app_id', '').strip(),
         'feishu_app_secret': feishu_app_secret,
         'feishu_verification_token': feishu_verification_token,
@@ -1712,6 +1731,97 @@ def process_feishu_event(message: dict[str, Any], config: dict[str, Any]) -> Non
         feishu_reply_message(config, message.get('message_id', ''), reply)
     except Exception as exc:
         print(f'Feishu reply failed: {exc}')
+
+
+def object_attr(source: Any, name: str, default: Any = '') -> Any:
+    return getattr(source, name, default) if source is not None else default
+
+
+def ws_message_to_payload(event: Any) -> dict[str, Any]:
+    header = object_attr(event, 'header', None)
+    event_data = object_attr(event, 'event', None)
+    sender = object_attr(event_data, 'sender', None)
+    sender_id = object_attr(sender, 'sender_id', None)
+    message = object_attr(event_data, 'message', None)
+    return {
+        'schema': '2.0',
+        'header': {
+            'event_id': object_attr(header, 'event_id', '') or object_attr(message, 'message_id', ''),
+            'event_type': object_attr(header, 'event_type', 'im.message.receive_v1'),
+            'token': object_attr(header, 'token', ''),
+        },
+        'event': {
+            'sender': {
+                'sender_id': {
+                    'open_id': object_attr(sender_id, 'open_id', ''),
+                    'user_id': object_attr(sender_id, 'user_id', ''),
+                    'union_id': object_attr(sender_id, 'union_id', ''),
+                }
+            },
+            'message': {
+                'message_id': object_attr(message, 'message_id', ''),
+                'chat_id': object_attr(message, 'chat_id', ''),
+                'message_type': object_attr(message, 'message_type', ''),
+                'content': object_attr(message, 'content', ''),
+            },
+        },
+    }
+
+
+def handle_feishu_ws_message(event: Any) -> None:
+    config = load_config()
+    if not config.get('feishu_enabled') or config.get('feishu_receive_mode') != 'ws':
+        return
+    payload = ws_message_to_payload(event)
+    message = extract_feishu_message(payload)
+    if not message:
+        return
+    event_key = message.get('event_id') or message.get('message_id')
+    if feishu_event_seen(event_key):
+        return
+    process_feishu_event(message, config)
+
+
+def start_feishu_ws_client() -> None:
+    global FEISHU_WS_THREAD, FEISHU_WS_STARTED_FOR
+    config = load_config()
+    if not config.get('feishu_enabled') or config.get('feishu_receive_mode') != 'ws':
+        return
+    app_id = config.get('feishu_app_id', '')
+    app_secret = config.get('feishu_app_secret', '')
+    if not app_id or not app_secret:
+        print('Feishu WS disabled: App ID/App Secret is missing.')
+        return
+    if lark is None or P2ImMessageReceiveV1 is None:
+        print('Feishu WS disabled: lark-oapi is not installed.')
+        return
+    started_key = hashlib.sha256(f'{app_id}:{app_secret}'.encode('utf-8')).hexdigest()
+    if FEISHU_WS_THREAD and FEISHU_WS_THREAD.is_alive() and FEISHU_WS_STARTED_FOR == started_key:
+        return
+
+    def run() -> None:
+        try:
+            if lark_ws_client is not None:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                lark_ws_client.loop = loop
+            handler = (
+                lark.EventDispatcherHandler.builder(
+                    config.get('feishu_encrypt_key', ''),
+                    config.get('feishu_verification_token', ''),
+                )
+                .register_p2_im_message_receive_v1(handle_feishu_ws_message)
+                .build()
+            )
+            client = lark.ws.Client(app_id, app_secret, event_handler=handler)
+            print('Feishu WS client starting.')
+            client.start()
+        except Exception as exc:
+            print(f'Feishu WS client stopped: {exc}')
+
+    FEISHU_WS_STARTED_FOR = started_key
+    FEISHU_WS_THREAD = threading.Thread(target=run, name='feishu-ws-client', daemon=True)
+    FEISHU_WS_THREAD.start()
 
 
 def parse_excel_date(value: str) -> Any:
@@ -3355,7 +3465,9 @@ def get_config(_: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
 
 @app.post('/api/config')
 def update_config(payload: ConfigPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
-    return mask_config(save_config(payload.model_dump()))
+    config = save_config(payload.model_dump())
+    start_feishu_ws_client()
+    return mask_config(config)
 
 
 @app.post('/api/config/test')

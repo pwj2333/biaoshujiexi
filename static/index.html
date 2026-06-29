@@ -112,7 +112,14 @@
               <span>启用飞书事件回调</span>
             </label>
             <label class="field">
-              <span>回调地址</span>
+              <span>接收模式</span>
+              <select id="feishuReceiveMode">
+                <option value="ws">长连接（匹配当前飞书配置）</option>
+                <option value="http">HTTP 回调</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>HTTP 回调地址（仅 HTTP 模式使用）</span>
               <input id="feishuCallbackUrl" readonly />
             </label>
             <label class="field">

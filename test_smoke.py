@@ -9,7 +9,7 @@ import httpx
 from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 
-from app import ProjectPayload, app, call_chat_completion, extract_document_text, handle_feishu_message, load_config, load_users, market_record_path, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_config, save_project, save_users
+from app import ProjectPayload, app, call_chat_completion, extract_document_text, handle_feishu_message, load_config, load_users, market_record_path, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_config, save_project, save_users, ws_message_to_payload
 
 
 def cleanup(project_id: str) -> None:
@@ -479,6 +479,7 @@ try:
             'api_key': '',
             'model': '',
             'feishu_enabled': True,
+            'feishu_receive_mode': 'http',
             'feishu_app_id': 'cli_smoke',
             'feishu_app_secret': 'secret-smoke',
             'feishu_verification_token': 'verify-smoke',
@@ -499,6 +500,24 @@ try:
     assert verify_resp.json()['challenge'] == 'challenge-ok'
 
     assert '可用指令' in handle_feishu_message({'open_id': 'ou_anyone', 'chat_id': 'chat_anywhere', 'message_id': 'mid-help', 'text': '帮助', 'files': []}, load_config())
+    ws_event = type(
+        'WsEvent',
+        (),
+        {
+            'header': type('Header', (), {'event_id': 'ws-event', 'event_type': 'im.message.receive_v1', 'token': ''})(),
+            'event': type(
+                'Event',
+                (),
+                {
+                    'sender': type('Sender', (), {'sender_id': type('SenderId', (), {'open_id': 'ou_ws', 'user_id': '', 'union_id': ''})()})(),
+                    'message': type('Message', (), {'message_id': 'mid-ws', 'chat_id': 'chat_ws', 'message_type': 'text', 'content': '{"text":"帮助"}'})(),
+                },
+            )(),
+        },
+    )()
+    ws_payload = ws_message_to_payload(ws_event)
+    assert ws_payload['header']['event_type'] == 'im.message.receive_v1'
+    assert ws_payload['event']['message']['content'] == '{"text":"帮助"}'
 
     message = {
         'open_id': 'ou_smoke',
