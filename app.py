@@ -151,6 +151,66 @@ FEISHU_TOOL_NAMES = {
     'cancel_pending',
 }
 
+FEISHU_SKILLS: dict[str, dict[str, Any]] = {
+    'help': {
+        'title': '系统总览',
+        'description': '告诉用户系统能做什么，并给出下一步输入示例。',
+        'keywords': ('帮助', '你好', '你能做什么', '菜单', '功能'),
+        'example': '你好',
+    },
+    'bid_parse': {
+        'title': '标书解析',
+        'description': '上传标书文件后，提取核心字段、风险点和原文依据。',
+        'keywords': ('解析标书', '标书解析', '招标文件', '投标文件'),
+        'example': '解析标书',
+        'needs_file': True,
+        'confirmation': False,
+    },
+    'project_search': {
+        'title': '项目查询',
+        'description': '按项目名、招标编号、年份查询历史项目台账。',
+        'keywords': ('查询', '查询项目', '历史', '台账', '项目'),
+        'example': '查询 福海创',
+        'confirmation': False,
+    },
+    'cargo_opportunity': {
+        'title': '商机收集',
+        'description': '识别货盘信息并沉淀到市场情报台账。',
+        'keywords': ('商机', '货盘', '货源', '成交价', '运价'),
+        'example': '4000吨甲苯，张家港～东莞，要求月内装出',
+        'kind': 'cargo',
+        'confirmation': True,
+    },
+    'newbuilding_info': {
+        'title': '新造船收集',
+        'description': '识别新造船信息并沉淀到市场情报台账。',
+        'keywords': ('新造船', '造船', '船厂', '交付', '出厂'),
+        'example': '某油化船，船厂A，船东B，DWT 50000，预计2027年出厂',
+        'kind': 'newbuilding',
+        'confirmation': True,
+    },
+    'cargo_report': {
+        'title': '商机市场分析',
+        'description': '按用户选择的时间范围生成商机市场分析报告。',
+        'keywords': ('商机分析', '商机报告', '市场分析', '周报', '月报', '报告'),
+        'example': '生成商机报告，本月',
+        'kind': 'cargo',
+        'needs_period': True,
+        'confirmation': False,
+    },
+    'newbuilding_report': {
+        'title': '新造船市场分析',
+        'description': '按用户选择的时间范围生成新造船市场分析报告。',
+        'keywords': ('新造船分析', '新造船报告', '市场分析', '周报', '月报', '报告'),
+        'example': '生成新造船报告，本月',
+        'kind': 'newbuilding',
+        'needs_period': True,
+        'confirmation': False,
+    },
+}
+
+FEISHU_SKILL_ORDER = tuple(FEISHU_SKILLS.keys())
+
 STATUS_LABELS = {'ok', '已明确满足', '需人工确认', '疑似风险/否决项'}
 ELLIPSIS_MARKERS = ('...', '…', '⋯', '。。。')
 BID_STATUS_OPTIONS = ('待跟进', '准备投标', '已投标', '放弃', '未投标')
@@ -1781,6 +1841,594 @@ def handle_feishu_ws_message(event: Any) -> None:
         return
     process_feishu_event(message, config)
 
+
+def feishu_dialog_defaults() -> dict[str, Any]:
+    return {
+        'active_skill': '',
+        'seed_text': '',
+        'slots': {},
+        'missing': [],
+        'pending_confirm': {},
+        'last_question': '',
+        'retry_count': 0,
+        'last_result': {},
+    }
+
+
+def feishu_dialog_load(open_id: str, chat_id: str) -> dict[str, Any]:
+    session = feishu_dialog_defaults()
+    loaded = load_feishu_session(open_id, chat_id)
+    if isinstance(loaded, dict):
+        session.update(loaded)
+    session['active_skill'] = compact_text(session.get('active_skill'))
+    session['seed_text'] = str(session.get('seed_text') or '')
+    session['slots'] = session.get('slots') if isinstance(session.get('slots'), dict) else {}
+    session['missing'] = [compact_text(item) for item in (session.get('missing') or []) if compact_text(item)]
+    pending = session.get('pending_confirm')
+    if not isinstance(pending, dict):
+        pending = session.get('pending') if isinstance(session.get('pending'), dict) else {}
+    session['pending_confirm'] = pending if isinstance(pending, dict) else {}
+    session['last_question'] = compact_text(session.get('last_question'))
+    session['retry_count'] = int(session.get('retry_count') or 0)
+    session['last_result'] = session.get('last_result') if isinstance(session.get('last_result'), dict) else {}
+    return session
+
+
+def feishu_dialog_save(open_id: str, chat_id: str, session: dict[str, Any]) -> None:
+    payload = feishu_dialog_defaults()
+    payload.update(session)
+    payload['active_skill'] = compact_text(payload.get('active_skill'))
+    payload['seed_text'] = str(payload.get('seed_text') or '')
+    payload['slots'] = payload.get('slots') if isinstance(payload.get('slots'), dict) else {}
+    payload['missing'] = [compact_text(item) for item in (payload.get('missing') or []) if compact_text(item)]
+    payload['pending_confirm'] = payload.get('pending_confirm') if isinstance(payload.get('pending_confirm'), dict) else {}
+    payload['last_question'] = compact_text(payload.get('last_question'))
+    payload['retry_count'] = int(payload.get('retry_count') or 0)
+    payload['last_result'] = payload.get('last_result') if isinstance(payload.get('last_result'), dict) else {}
+    save_feishu_session(open_id, chat_id, payload)
+
+
+def feishu_dialog_clear(open_id: str, chat_id: str) -> None:
+    clear_feishu_session(open_id, chat_id)
+
+
+def feishu_skill_is_confirm(text: str) -> bool:
+    compact = compact_text(text).replace(' ', '')
+    return compact in {'确认', '确认保存', '保存', '好的', '可以', '行', '同意'}
+
+
+def feishu_skill_is_cancel(text: str) -> bool:
+    compact = compact_text(text).replace(' ', '')
+    return compact in {'取消', '放弃', '不要了', '算了', '撤销'}
+
+
+def feishu_skill_is_help(text: str) -> bool:
+    compact = compact_text(text).replace(' ', '')
+    return compact in {'帮助', '菜单', '功能', '你好', '在吗', '你能做什么', '怎么用', '说明'}
+
+
+def feishu_skill_catalog_text() -> str:
+    lines = ['我现在能做这些事：']
+    for skill_name in FEISHU_SKILL_ORDER:
+        meta = FEISHU_SKILLS[skill_name]
+        lines.append(f"- {meta['title']}：{meta['description']}")
+        example = compact_text(meta.get('example') or '')
+        if example:
+            lines.append(f"  例子：{example}")
+    lines.extend(['', '你可以直接发自然语言，不用先选菜单。', '我会先告诉你系统能做什么，还缺什么，下一步怎么回。'])
+    return '\n'.join(lines)
+
+
+def feishu_guess_period(text: str) -> tuple[str, str, str]:
+    now = datetime.now()
+    compact = compact_text(text)
+    if any(word in compact for word in ('本周', '这周', '最近7天', '近7天')):
+        start = now - timedelta(days=now.weekday())
+        return 'weekly', start.strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d')
+    if any(word in compact for word in ('上周', '上星期')):
+        monday = now - timedelta(days=now.weekday())
+        start = monday - timedelta(days=7)
+        end = monday - timedelta(days=1)
+        return 'weekly', start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
+    if any(word in compact for word in ('本月', '这个月', '当月')):
+        return 'monthly', now.replace(day=1).strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d')
+    if any(word in compact for word in ('上月', '上个月')):
+        first = now.replace(day=1)
+        end = first - timedelta(days=1)
+        start = end.replace(day=1)
+        return 'monthly', start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
+    range_match = re.search(
+        r'(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})[日]?\s*(?:到|至|~|-)\s*(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})[日]?',
+        compact,
+    )
+    if range_match:
+        start = datetime(int(range_match.group(1)), int(range_match.group(2)), int(range_match.group(3)))
+        end = datetime(int(range_match.group(4)), int(range_match.group(5)), int(range_match.group(6)))
+        period = 'weekly' if (end.date() - start.date()).days <= 7 else 'custom'
+        return period, start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
+    one_date = re.search(r'(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})[日]?', compact)
+    if one_date:
+        date_text = datetime(int(one_date.group(1)), int(one_date.group(2)), int(one_date.group(3)))
+        return 'custom', date_text.strftime('%Y-%m-%d'), date_text.strftime('%Y-%m-%d')
+    return 'custom', '', ''
+
+
+def feishu_skill_route_prompt(text: str, files: list[dict[str, str]], session: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            'user_text': text,
+            'files': files,
+            'session': {
+                'active_skill': session.get('active_skill', ''),
+                'slots': session.get('slots', {}),
+                'missing': session.get('missing', []),
+                'pending_confirm': bool(session.get('pending_confirm')),
+                'last_question': session.get('last_question', ''),
+                'seed_text': session.get('seed_text', ''),
+            },
+            'skills': [
+                {
+                    'skill': skill_name,
+                    'title': meta['title'],
+                    'description': meta['description'],
+                    'needs_file': bool(meta.get('needs_file')),
+                    'needs_period': bool(meta.get('needs_period')),
+                    'confirmation': bool(meta.get('confirmation')),
+                    'example': meta.get('example') or '',
+                }
+                for skill_name, meta in FEISHU_SKILLS.items()
+            ],
+            'output_schema': {
+                'skill': 'help',
+                'action': 'clarify',
+                'confidence': 0.0,
+                'slots': {},
+                'missing': [],
+                'next_question': '',
+                'reply_hint': '',
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def feishu_skill_route_from_ai(text: str, files: list[dict[str, str]], session: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    if not (config.get('base_url') and config.get('api_key') and config.get('model')):
+        return None
+    system_prompt = (
+        '你是飞书里的系统总控 Skill。'
+        '你的任务是先识别用户意图，再判断系统能做什么、还缺什么，最后输出严格 JSON。'
+        '只能输出 JSON，不能输出 Markdown、解释、前后缀。'
+        'skill 只能取 help、bid_parse、project_search、cargo_opportunity、newbuilding_info、cargo_report、newbuilding_report。'
+        'action 只能取 help、clarify、preview、execute、confirm、cancel。'
+        '如果用户是在延续上一轮对话，请结合 session.active_skill、session.slots、session.pending_confirm 判断。'
+        '如果缺关键输入，action 必须是 clarify，并在 next_question 里给出一句可直接发送的补充问题。'
+        '如果用户在问系统能做什么，直接返回 help。'
+        '如果用户要确认保存，action 返回 confirm。'
+        '如果用户要取消，action 返回 cancel。'
+        '如果用户发了标书文件并说解析标书，skill 返回 bid_parse。'
+    )
+    try:
+        current_content = call_chat_completion(
+            config,
+            system_prompt=system_prompt,
+            user_prompt=feishu_skill_route_prompt(text, files, session),
+            temperature=0,
+        )
+    except HTTPException:
+        return None
+    last_error = 'AI 返回内容无法解析。'
+    for round_index in range(3):
+        try:
+            route = parse_json_text(current_content)
+            if not isinstance(route, dict):
+                raise HTTPException(status_code=502, detail='AI 返回的路由不是 JSON 对象。')
+            skill = compact_text(route.get('skill'))
+            action = compact_text(route.get('action'))
+            if skill not in FEISHU_SKILLS or action not in {'help', 'clarify', 'preview', 'execute', 'confirm', 'cancel'}:
+                raise HTTPException(status_code=502, detail='skill 或 action 不在允许列表内。')
+            route['skill'] = skill
+            route['action'] = action
+            route['slots'] = route.get('slots') if isinstance(route.get('slots'), dict) else {}
+            route['missing'] = [compact_text(item) for item in (route.get('missing') or []) if compact_text(item)]
+            route['next_question'] = compact_text(route.get('next_question'))
+            route['reply_hint'] = compact_text(route.get('reply_hint'))
+            route['confidence'] = float(route.get('confidence') or 0)
+            return route
+        except HTTPException as exc:
+            last_error = str(exc.detail)
+            if round_index == 2:
+                break
+            try:
+                current_content = call_chat_completion(
+                    config,
+                    system_prompt=JSON_REPAIR_SYSTEM_PROMPT,
+                    user_prompt=build_json_repair_prompt(current_content, last_error),
+                    temperature=0,
+                )
+            except HTTPException:
+                break
+    return None
+
+
+def feishu_skill_from_text(text: str, files: list[dict[str, str]], session: dict[str, Any]) -> str:
+    compact = compact_text(text).replace(' ', '')
+    if feishu_skill_is_help(compact):
+        return 'help'
+    if files and any(name.lower().endswith(('.pdf', '.doc', '.docx', '.xls', '.xlsx')) for name in (item.get('file_name', '') for item in files)):
+        if any(word in compact for word in ('解析', '标书', '招标', '投标')) or not compact:
+            return 'bid_parse'
+    if any(word in compact for word in ('商机报告', '商机分析', '商机市场分析', '运价', '成交价趋势')):
+        return 'cargo_report'
+    if any(word in compact for word in ('新造船报告', '新造船分析', '造船市场分析')):
+        return 'newbuilding_report'
+    if any(word in compact for word in ('新造船', '造船', '船厂', '船东', '交付', '出厂', 'DWT', 'dwt')):
+        return 'newbuilding_info'
+    if any(word in compact for word in ('货盘', '商机', '成交价', '运价', '装港', '卸港', '吨', '吨位', '甲苯', '溶剂', '成品油', '化学品')):
+        return 'cargo_opportunity'
+    if any(word in compact for word in ('查询', '查找', '搜索', '项目', '台账')):
+        return 'project_search'
+    if compact and session.get('active_skill') in FEISHU_SKILLS:
+        return str(session.get('active_skill'))
+    return 'help'
+
+
+def feishu_skill_missing_fields(skill: str, text: str, slots: dict[str, Any]) -> list[str]:
+    if skill == 'cargo_opportunity':
+        name = compact_text(slots.get('cargo_name'))
+        load_port = compact_text(slots.get('load_port'))
+        discharge_port = compact_text(slots.get('discharge_port'))
+        tonnage = compact_text(slots.get('tonnage'))
+        if name and load_port and discharge_port and tonnage:
+            return []
+        return [field for field in ['cargo_name', 'tonnage', 'load_port', 'discharge_port'] if not compact_text(slots.get(field))]
+    if skill == 'newbuilding_info':
+        ship_name = compact_text(slots.get('ship_name'))
+        shipyard = compact_text(slots.get('shipyard'))
+        owner = compact_text(slots.get('owner'))
+        dwt = compact_text(slots.get('dwt'))
+        if sum(bool(item) for item in [ship_name, shipyard, owner, dwt]) >= 2:
+            return []
+        return [field for field in ['ship_name', 'shipyard', 'owner', 'dwt'] if not compact_text(slots.get(field))]
+    if skill in {'cargo_report', 'newbuilding_report'}:
+        period, start_date, end_date = feishu_guess_period(text)
+        if period == 'custom' and not (start_date and end_date):
+            return ['period']
+        return []
+    if skill == 'project_search':
+        query = compact_text(slots.get('query') or text)
+        return [] if query else ['query']
+    return []
+
+
+def feishu_skill_next_question(skill: str, missing: list[str]) -> str:
+    if skill == 'cargo_opportunity':
+        return '我先按商机货盘处理。请补一句装港、卸港、装载期，最好再带上货主或船舶方位。'
+    if skill == 'newbuilding_info':
+        return '我先按新造船信息处理。请补一句船名、船厂、船东、DWT 或建造阶段。'
+    if skill == 'project_search':
+        return '请告诉我项目名、招标编号，或者直接发“查询 + 关键词”。'
+    if skill in {'cargo_report', 'newbuilding_report'}:
+        return '请先选时间范围，例如“本周”“本月”或者“2026-06-01 到 2026-06-30”。'
+    if skill == 'bid_parse':
+        return '请先上传标书文件，再说“解析标书”。当前版本支持 PDF、DOC、DOCX、XLS、XLSX。'
+    return '你可以直接发自然语言，我来帮你判断要走哪个功能。'
+
+
+def feishu_skill_reply_prefix(skill: str, action: str, missing: list[str]) -> str:
+    title = FEISHU_SKILLS.get(skill, {}).get('title', skill)
+    lines = [f'我识别到的意图：{title}']
+    if action == 'clarify':
+        lines.append(f"还缺：{', '.join(missing) if missing else '少量关键信息'}")
+    elif action == 'confirm':
+        lines.append('已按当前草稿执行保存。')
+    elif action == 'cancel':
+        lines.append('已取消当前待办。')
+    return '\n'.join(lines)
+
+
+def feishu_skill_preview_bid(result: dict[str, Any]) -> str:
+    summary = result.get('document_summary') or {}
+    analysis = result.get('analysis') or {}
+    review = result.get('match_review') or []
+    return '\n'.join(
+        [
+            '标书解析完成：',
+            f"项目名称：{summary.get('project_name') or '-'}",
+            f"招标编号：{summary.get('bid_no') or '-'}",
+            f"招标人：{summary.get('tenderer') or '-'}",
+            f"投标截止时间：{summary.get('bid_deadline') or '-'}",
+            f"开标时间：{summary.get('open_time') or '-'}",
+            f"保证金：{summary.get('deposit_amount') or '-'}",
+            f"资格要求：{compact_paragraph(summary.get('qualification_requirements'))[:500] or '-'}",
+            f"风险提示：{', '.join(str(item.get('reason') or item) for item in review[:3]) or '-'}",
+            f"解析结论：{analysis.get('summary') or '-'}",
+            '下一步：如果要继续追问标书内容，我可以基于这次解析结果继续回答。',
+        ]
+    )
+
+
+def feishu_skill_preview_record(skill: str, record: dict[str, Any]) -> str:
+    if skill == 'cargo_opportunity':
+        lines = [
+            '我已识别到一条商机货盘草稿：',
+            f"货名：{record.get('cargo_name') or '-'}",
+            f"吨数：{record.get('tonnage') or '-'}",
+            f"装港：{record.get('load_port') or '-'}",
+            f"卸港：{record.get('discharge_port') or '-'}",
+            f"装载期：{record.get('laycan') or '-'}",
+            f"货主：{record.get('cargo_owner') or '-'}",
+            f"航线：{record.get('route') or '-'}",
+            f"成交状态：{record.get('status') or '-'}",
+            f"最终成交价：{record.get('deal_price') or record.get('final_price') or '-'}",
+        ]
+    else:
+        lines = [
+            '我已识别到一条新造船草稿：',
+            f"船名：{record.get('ship_name') or '-'}",
+            f"船厂：{record.get('shipyard') or '-'}",
+            f"船东：{record.get('owner') or '-'}",
+            f"DWT：{record.get('dwt') or '-'}",
+            f"阶段：{record.get('stage') or '-'}",
+            f"预计交付：{record.get('delivery_time') or '-'}",
+        ]
+    lines.append('下一步：回复“确认保存”写入台账，或者回复“取消”放弃。')
+    return '\n'.join(lines)
+
+
+def feishu_skill_preview_report(skill: str, report: dict[str, Any]) -> str:
+    title = '商机市场分析报告' if skill == 'cargo_report' else '新造船市场分析报告'
+    lines = [f'已生成{title}：', f"摘要：{report.get('summary') or '-'}"]
+    for label, key in [('关键发现', 'key_findings'), ('风险提示', 'risks'), ('经营建议', 'recommendations')]:
+        values = [str(item) for item in (report.get(key) or []) if str(item).strip()]
+        if values:
+            lines.append(f'{label}：')
+            lines.extend(f'- {item}' for item in values[:5])
+    lines.append('下一步：如果要导出 Word / Excel，请到网页端的“市场情报”里操作。')
+    return '\n'.join(lines)
+
+
+def feishu_answer_bid_question(result: dict[str, Any], question: str, config: dict[str, Any]) -> str:
+    summary = result.get('document_summary') or {}
+    q = compact_text(question)
+    if any(word in q for word in ('截止', '投标截止')):
+        return f"本次标书里能直接确认的投标截止时间是：{summary.get('bid_deadline') or '-'}。"
+    if any(word in q for word in ('开标', '开标时间')):
+        return f"本次标书里能直接确认的开标时间是：{summary.get('open_time') or '-'}。"
+    if '保证金' in q:
+        return f"本次标书里能直接确认的保证金是：{summary.get('deposit_amount') or '-'}。"
+    if any(word in q for word in ('资格', '资质', '条件')):
+        return f"本次标书里能直接确认的资格要求是：{compact_paragraph(summary.get('qualification_requirements'))[:500] or '-'}。"
+    if any(word in q for word in ('评标', '评分')):
+        return f"本次标书里能直接确认的评标方法是：{summary.get('evaluation_method') or '-'}。"
+    try:
+        answer = call_chat_completion(
+            config,
+            system_prompt=CHAT_SYSTEM_PROMPT,
+            user_prompt=build_chat_prompt({'result': result}, question),
+            temperature=0.2,
+        )
+        return f"{answer.strip()}\n下一步：如果还要继续问这份标书，直接接着发问题就行。"
+    except HTTPException:
+        return '我已保留这次标书解析结果。你可以继续问我“投标截止时间 / 保证金 / 资格要求 / 评标标准”。'
+
+
+def feishu_skill_route(text: str, files: list[dict[str, str]], session: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    compact = compact_text(text)
+    if feishu_skill_is_cancel(compact):
+        return {'skill': 'help', 'action': 'cancel', 'slots': {}, 'missing': [], 'next_question': ''}
+    if feishu_skill_is_confirm(compact):
+        return {'skill': compact_text(session.get('active_skill') or 'help'), 'action': 'confirm', 'slots': {}, 'missing': [], 'next_question': ''}
+    if feishu_skill_is_help(compact) and not session.get('pending_confirm'):
+        return {'skill': 'help', 'action': 'help', 'slots': {}, 'missing': [], 'next_question': ''}
+
+    ai_route = feishu_skill_route_from_ai(text, files, session, config)
+    if ai_route:
+        return ai_route
+
+    skill = feishu_skill_from_text(text, files, session)
+    if skill == 'project_search':
+        query = compact_text(re.sub(r'^(查询|查找|搜索|搜索一下|查询项目)', '', compact).strip())
+        if not query and session.get('active_skill') == 'project_search':
+            query = compact_text(session.get('slots', {}).get('query'))
+        if not query:
+            return {'skill': skill, 'action': 'clarify', 'slots': {}, 'missing': ['query'], 'next_question': feishu_skill_next_question(skill, ['query'])}
+        return {'skill': skill, 'action': 'execute', 'slots': {'query': query}, 'missing': [], 'next_question': ''}
+    if skill in {'cargo_report', 'newbuilding_report'}:
+        period, start_date, end_date = feishu_guess_period(text)
+        if not (period and start_date and end_date) or (period == 'custom' and not (start_date and end_date)):
+            return {'skill': skill, 'action': 'clarify', 'slots': {}, 'missing': ['period'], 'next_question': feishu_skill_next_question(skill, ['period'])}
+        return {'skill': skill, 'action': 'execute', 'slots': {'period': period, 'start_date': start_date, 'end_date': end_date}, 'missing': [], 'next_question': ''}
+    if skill == 'bid_parse':
+        if not files and not session.get('last_result'):
+            return {'skill': skill, 'action': 'clarify', 'slots': {}, 'missing': ['file'], 'next_question': feishu_skill_next_question(skill, ['file'])}
+        return {'skill': skill, 'action': 'execute', 'slots': {}, 'missing': [], 'next_question': ''}
+    if skill in {'cargo_opportunity', 'newbuilding_info'}:
+        return {'skill': skill, 'action': 'execute', 'slots': {}, 'missing': [], 'next_question': ''}
+    return {'skill': 'help', 'action': 'help', 'slots': {}, 'missing': [], 'next_question': ''}
+
+
+def feishu_skill_execute(route: dict[str, Any], message: dict[str, Any], config: dict[str, Any]) -> str:
+    open_id = message.get('open_id', '')
+    chat_id = message.get('chat_id', '')
+    text = compact_text(message.get('text') or '')
+    files = message.get('files') or []
+    session = feishu_dialog_load(open_id, chat_id)
+    skill = compact_text(route.get('skill'))
+    action = compact_text(route.get('action'))
+    slots = route.get('slots') if isinstance(route.get('slots'), dict) else {}
+    missing = [compact_text(item) for item in (route.get('missing') or []) if compact_text(item)]
+    next_question = compact_text(route.get('next_question'))
+
+    if action == 'cancel':
+        feishu_dialog_clear(open_id, chat_id)
+        return '已取消当前待办。你可以继续发新内容，我会重新识别。'
+
+    if action == 'help':
+        feishu_dialog_clear(open_id, chat_id)
+        return feishu_skill_catalog_text()
+
+    if action == 'confirm':
+        pending = session.get('pending_confirm') if isinstance(session.get('pending_confirm'), dict) else {}
+        if pending.get('type') != 'market_record':
+            return '当前没有待保存内容。你可以直接发新的商机货盘、新造船信息或标书文件。'
+        record = save_market_record(str(pending.get('kind') or ''), pending.get('record') or {})
+        feishu_dialog_clear(open_id, chat_id)
+        return f"已保存到市场情报台账，记录 ID：{record.get('id')}\n下一步：可以继续发新的商机或新造船信息。"
+
+    if skill == 'project_search':
+        query = compact_text(slots.get('query') or re.sub(r'^(查询|查找|搜索|搜索一下|查询项目)', '', text))
+        items, _ = collect_project_items(q=query)
+        if not items:
+            session.update({'active_skill': 'project_search', 'slots': {'query': query}, 'last_question': next_question or feishu_skill_next_question('project_search', ['query'])})
+            feishu_dialog_save(open_id, chat_id, session)
+            return f'没有找到匹配的历史项目。请换一个关键词，比如项目名、招标编号或更短的关键词：{query or "（空）"}'
+        lines = ['查询到以下历史项目：']
+        for index, item in enumerate(items[:5], start=1):
+            lines.append(
+                f"{index}. {item.get('title') or item.get('project_name') or '未命名项目'}\n"
+                f"   招标编号：{item.get('bid_no') or '-'}\n"
+                f"   招标人：{item.get('tenderer') or '-'}\n"
+                f"   投标状态：{item.get('bid_status') or '-'}，中标状态：{item.get('award_status') or '-'}"
+            )
+        lines.append('下一步：如果要看详情，请在网页端打开历史台账；如果要查其他项目，继续发送“查询 + 关键词”。')
+        feishu_dialog_clear(open_id, chat_id)
+        return '\n'.join(lines)
+
+    if skill == 'bid_parse':
+        if not files and not session.get('last_result'):
+            session.update({'active_skill': 'bid_parse', 'last_question': next_question or feishu_skill_next_question('bid_parse', ['file'])})
+            feishu_dialog_save(open_id, chat_id, session)
+            return next_question or feishu_skill_next_question('bid_parse', ['file'])
+        if not files and session.get('last_result') and text:
+            answer = feishu_answer_bid_question(session['last_result'], text, config)
+            session['last_question'] = text
+            feishu_dialog_save(open_id, chat_id, session)
+            return answer
+        file_info = files[0]
+        temp_path = feishu_download_file(config, message.get('message_id', ''), file_info.get('file_key', ''), file_info.get('file_name', ''))
+        try:
+            suffix = Path(file_info.get('file_name') or temp_path.name).suffix.lower() or temp_path.suffix.lower()
+            if suffix not in {'.pdf', '.doc', '.docx', '.xls', '.xlsx'}:
+                raise HTTPException(status_code=400, detail='当前只支持 PDF、DOC、DOCX、XLS、XLSX 标书文件。')
+            document_text = extract_document_text(temp_path, suffix)
+            if len(document_text.strip()) < 80:
+                raise HTTPException(status_code=400, detail='当前版本只支持可提取文本的文件，扫描件暂不支持。')
+            result = parse_ai_document(document_text, require_config())
+            session.update(
+                {
+                    'active_skill': 'bid_parse',
+                    'seed_text': text,
+                    'slots': {},
+                    'missing': [],
+                    'pending_confirm': {},
+                    'last_question': '',
+                    'retry_count': 0,
+                    'last_result': result,
+                }
+            )
+            feishu_dialog_save(open_id, chat_id, session)
+            return feishu_skill_preview_bid(result)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    if skill in {'cargo_opportunity', 'newbuilding_info'}:
+        record_kind = 'cargo' if skill == 'cargo_opportunity' else 'newbuilding'
+        merged_text = text
+        if session.get('active_skill') == skill and compact_text(session.get('seed_text')):
+            merged_text = f"{session.get('seed_text')}\n{text}".strip()
+        record = extract_market_record(record_kind, merged_text)
+        missing = feishu_skill_missing_fields(skill, merged_text, record)
+        if missing:
+            session.update(
+                {
+                    'active_skill': skill,
+                    'seed_text': merged_text,
+                    'slots': record,
+                    'missing': missing,
+                    'pending_confirm': {},
+                    'last_question': next_question or feishu_skill_next_question(skill, missing),
+                    'retry_count': 0,
+                }
+            )
+            feishu_dialog_save(open_id, chat_id, session)
+            return '\n'.join([feishu_skill_reply_prefix(skill, 'clarify', missing), next_question or feishu_skill_next_question(skill, missing)])
+        session.update(
+            {
+                'active_skill': skill,
+                'seed_text': merged_text,
+                'slots': record,
+                'missing': [],
+                'pending_confirm': {'type': 'market_record', 'kind': record_kind, 'record': record, 'created_at': datetime.now().isoformat(timespec='seconds')},
+                'last_question': '回复“确认保存”即可写入台账，或回复“取消”放弃。',
+                'retry_count': 0,
+            }
+        )
+        feishu_dialog_save(open_id, chat_id, session)
+        return feishu_skill_preview_record(skill, record)
+
+    if skill in {'cargo_report', 'newbuilding_report'}:
+        period = compact_text(slots.get('period'))
+        start_date = compact_text(slots.get('start_date'))
+        end_date = compact_text(slots.get('end_date'))
+        if not (period and start_date and end_date):
+            period, start_date, end_date = feishu_guess_period(text)
+        if not (period and start_date and end_date):
+            session.update({'active_skill': skill, 'last_question': next_question or feishu_skill_next_question(skill, ['period'])})
+            feishu_dialog_save(open_id, chat_id, session)
+            return '\n'.join([feishu_skill_reply_prefix(skill, 'clarify', ['period']), next_question or feishu_skill_next_question(skill, ['period'])])
+        report = build_market_report(
+            MarketReportPayload(
+                kind='cargo' if skill == 'cargo_report' else 'newbuilding',
+                period=period,
+                start_date=start_date,
+                end_date=end_date,
+                filters={},
+            )
+        )
+        session.update(
+            {
+                'active_skill': skill,
+                'seed_text': text,
+                'slots': {'period': period, 'start_date': start_date, 'end_date': end_date},
+                'missing': [],
+                'pending_confirm': {},
+                'last_question': '',
+                'retry_count': 0,
+                'last_result': report,
+            }
+        )
+        feishu_dialog_save(open_id, chat_id, session)
+        return feishu_skill_preview_report(skill, report)
+
+    if session.get('active_skill') == 'bid_parse' and session.get('last_result') and text and not files:
+        answer = feishu_answer_bid_question(session['last_result'], text, config)
+        session['last_question'] = text
+        feishu_dialog_save(open_id, chat_id, session)
+        return answer
+
+    feishu_dialog_clear(open_id, chat_id)
+    return feishu_skill_catalog_text()
+
+
+def handle_feishu_message(message: dict[str, Any], config: dict[str, Any]) -> str:
+    session = feishu_dialog_load(message.get('open_id', ''), message.get('chat_id', ''))
+    route = feishu_skill_route(message.get('text', ''), message.get('files') or [], session, config)
+    return feishu_skill_execute(route, message, config)
+
+
+def process_feishu_event(message: dict[str, Any], config: dict[str, Any]) -> None:
+    try:
+        reply = handle_feishu_message(message, config)
+    except HTTPException as exc:
+        reply = f'处理时遇到问题：{compact_text(exc.detail)}\n下一步：请补充缺失信息，或者回复“取消”重新开始。'
+    except Exception as exc:
+        print(f'Feishu skill error: {exc}')
+        reply = '处理时遇到问题：系统暂时没法完成这次请求。\n下一步：请稍后再试，或者换一种说法。'
+    try:
+        feishu_reply_message(config, message.get('message_id', ''), sanitize_feishu_reply(reply))
+    except Exception as exc:
+        print(f'Feishu reply failed: {exc}')
 
 def start_feishu_ws_client() -> None:
     global FEISHU_WS_THREAD, FEISHU_WS_STARTED_FOR
@@ -3873,6 +4521,26 @@ def _self_check() -> None:
     assert project['title'] == '测试项目'
     assert project_path('0' * 32).exists()
     project_path('0' * 32).unlink(missing_ok=True)
+
+
+def handle_feishu_message(message: dict[str, Any], config: dict[str, Any]) -> str:
+    session = feishu_dialog_load(message.get('open_id', ''), message.get('chat_id', ''))
+    route = feishu_skill_route(message.get('text', ''), message.get('files') or [], session, config)
+    return feishu_skill_execute(route, message, config)
+
+
+def process_feishu_event(message: dict[str, Any], config: dict[str, Any]) -> None:
+    try:
+        reply = handle_feishu_message(message, config)
+    except HTTPException as exc:
+        reply = f'处理时遇到问题：{compact_text(exc.detail)}\n下一步：请补充缺失信息，或者回复“取消”重新开始。'
+    except Exception as exc:
+        print(f'Feishu skill error: {exc}')
+        reply = '处理时遇到问题：系统暂时没法完成这次请求。\n下一步：请稍后再试，或者换一种说法。'
+    try:
+        feishu_reply_message(config, message.get('message_id', ''), sanitize_feishu_reply(reply))
+    except Exception as exc:
+        print(f'Feishu reply failed: {exc}')
 
 
 if __name__ == '__main__':

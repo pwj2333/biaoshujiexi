@@ -499,7 +499,9 @@ try:
     assert verify_resp.status_code == 200
     assert verify_resp.json()['challenge'] == 'challenge-ok'
 
-    assert '可用指令' in handle_feishu_message({'open_id': 'ou_anyone', 'chat_id': 'chat_anywhere', 'message_id': 'mid-help', 'text': '帮助', 'files': []}, load_config())
+    help_reply = handle_feishu_message({'open_id': 'ou_anyone', 'chat_id': 'chat_anywhere', 'message_id': 'mid-help', 'text': '帮助', 'files': []}, load_config())
+    assert '我现在能做这些事' in help_reply
+    assert '市场情报' in help_reply
     ws_event = type(
         'WsEvent',
         (),
