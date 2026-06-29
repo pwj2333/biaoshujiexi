@@ -348,6 +348,20 @@ button.ghost {
   padding: 0 18px 18px;
 }
 
+.check-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--muted);
+}
+
+.two-col {
+  display: grid;
+  grid-template-columns: 0.8fr 1.2fr;
+  gap: 10px;
+}
+
 .workspace {
   padding: 24px;
   display: grid;

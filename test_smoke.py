@@ -1,4 +1,6 @@
 import tempfile
+import uuid
+import re
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
@@ -7,7 +9,7 @@ import httpx
 from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 
-from app import ProjectPayload, app, call_chat_completion, extract_document_text, load_users, market_record_path, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_project, save_users
+from app import ProjectPayload, app, call_chat_completion, extract_document_text, handle_feishu_message, load_config, load_users, market_record_path, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_config, save_project, save_users
 
 
 def cleanup(project_id: str) -> None:
@@ -465,6 +467,58 @@ bad_docx_resp = client.post(
 )
 assert bad_docx_resp.status_code == 400
 assert 'DOCX 文件格式无效' in bad_docx_resp.json()['detail']
+
+original_config = load_config()
+feishu_cargo_id = ''
+try:
+    config_resp = client.post(
+        '/api/config',
+        json={
+            **original_config,
+            'base_url': '',
+            'api_key': '',
+            'model': '',
+            'feishu_enabled': True,
+            'feishu_app_id': 'cli_smoke',
+            'feishu_app_secret': 'secret-smoke',
+            'feishu_verification_token': 'verify-smoke',
+            'feishu_encrypt_key': 'encrypt-smoke',
+        },
+        headers=auth_headers,
+    )
+    assert config_resp.status_code == 200
+    masked_config = config_resp.json()
+    assert masked_config['has_feishu_app_secret'] is True
+    assert masked_config['feishu_app_secret'] == '********'
+
+    verify_resp = client.post(
+        '/api/feishu/events',
+        json={'type': 'url_verification', 'token': 'verify-smoke', 'challenge': 'challenge-ok'},
+    )
+    assert verify_resp.status_code == 200
+    assert verify_resp.json()['challenge'] == 'challenge-ok'
+
+    assert '可用指令' in handle_feishu_message({'open_id': 'ou_anyone', 'chat_id': 'chat_anywhere', 'message_id': 'mid-help', 'text': '帮助', 'files': []}, load_config())
+
+    message = {
+        'open_id': 'ou_smoke',
+        'chat_id': 'chat_smoke',
+        'message_id': 'mid-smoke',
+        'text': '4000吨甲苯，张家港～东莞，要求月内装出，远大的计划',
+        'files': [],
+    }
+    reply = handle_feishu_message(message, load_config())
+    assert '确认保存' in reply
+    assert '下一步' in reply
+    confirm_reply = handle_feishu_message({**message, 'text': '确认保存'}, load_config())
+    feishu_cargo_id = re.search(r'[a-f0-9]{32}', confirm_reply).group(0)
+    assert '已保存' in confirm_reply
+    assert '下一步' in confirm_reply
+    assert market_record_path('cargo', feishu_cargo_id).exists()
+finally:
+    if feishu_cargo_id:
+        cleanup_market('cargo', feishu_cargo_id)
+    save_config(original_config)
 
 users_resp = client.get('/api/users', headers=auth_headers)
 assert users_resp.status_code == 200

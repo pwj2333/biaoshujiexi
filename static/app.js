@@ -1274,6 +1274,15 @@ async function loadConfig() {
   $('modelName').value = config.model || '';
   $('apiKey').value = '';
   $('temperature').value = config.temperature ?? 0.1;
+  if ($('feishuCallbackUrl')) {
+    $('feishuCallbackUrl').value = `${window.location.origin}/api/feishu/events`;
+    $('feishuEnabled').checked = Boolean(config.feishu_enabled);
+    $('feishuAppId').value = config.feishu_app_id || '';
+    $('feishuAppSecret').value = '';
+    $('feishuVerificationToken').value = '';
+    $('feishuEncryptKey').value = '';
+    setStatus('feishuStatus', config.feishu_enabled ? '已启用' : '未启用', config.feishu_enabled ? 'ok' : 'neutral');
+  }
   setStatus('configStatus', config.base_url && config.has_api_key ? '已保存' : '未保存', config.base_url && config.has_api_key ? 'ok' : 'neutral');
 }
 
@@ -1283,6 +1292,11 @@ function readConfigForm() {
     api_key: $('apiKey').value.trim(),
     model: $('modelName').value.trim(),
     temperature: Number($('temperature').value || 0.1),
+    feishu_enabled: Boolean($('feishuEnabled')?.checked),
+    feishu_app_id: $('feishuAppId')?.value.trim() || '',
+    feishu_app_secret: $('feishuAppSecret')?.value.trim() || '',
+    feishu_verification_token: $('feishuVerificationToken')?.value.trim() || '',
+    feishu_encrypt_key: $('feishuEncryptKey')?.value.trim() || '',
   };
 }
 
@@ -1296,13 +1310,16 @@ function applyPreset(name) {
 }
 
 async function saveConfig() {
-  await request('/api/config', {
+  const config = await request('/api/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(readConfigForm()),
   });
   setStatus('configStatus', '已保存', 'ok');
-  showToast('AI 配置已保存');
+  if ($('feishuStatus')) {
+    setStatus('feishuStatus', config.feishu_enabled ? '已启用' : '未启用', config.feishu_enabled ? 'ok' : 'neutral');
+  }
+  showToast('配置已保存');
 }
 
 function hasConfigFormValues() {
@@ -1316,6 +1333,20 @@ async function testConfig() {
     body: JSON.stringify(readConfigForm()),
   });
   showToast(`连通成功：${result.message}`);
+}
+
+async function testFeishuMessage() {
+  await saveConfig();
+  await request('/api/feishu/test-message', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      receive_id_type: $('feishuTestReceiveType').value,
+      receive_id: $('feishuTestReceiveId').value.trim(),
+      text: '标书解析机器人测试消息：配置已连通。',
+    }),
+  });
+  showToast('飞书测试消息已发送');
 }
 
 function ensureDefaultTracking() {
@@ -1559,6 +1590,22 @@ function bindEvents() {
   bindClick('testConfigBtn', async () => {
     try {
       await testConfig();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  bindClick('saveFeishuBtn', async () => {
+    try {
+      await saveConfig();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  bindClick('testFeishuBtn', async () => {
+    try {
+      await testFeishuMessage();
     } catch (error) {
       showToast(error.message, true);
     }

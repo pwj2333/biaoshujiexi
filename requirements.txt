@@ -5,3 +5,4 @@ python-multipart
 openpyxl
 pypdf
 python-docx
+cryptography

@@ -100,6 +100,56 @@
             </div>
           </div>
         </details>
+
+        <details class="config-card">
+          <summary>
+            <span>飞书机器人</span>
+            <span id="feishuStatus" class="pill neutral">未启用</span>
+          </summary>
+          <div class="config-body">
+            <label class="check-line">
+              <input id="feishuEnabled" type="checkbox" />
+              <span>启用飞书事件回调</span>
+            </label>
+            <label class="field">
+              <span>回调地址</span>
+              <input id="feishuCallbackUrl" readonly />
+            </label>
+            <label class="field">
+              <span>App ID</span>
+              <input id="feishuAppId" placeholder="cli_..." />
+            </label>
+            <label class="field">
+              <span>App Secret</span>
+              <input id="feishuAppSecret" type="password" placeholder="留空则保留原值" />
+            </label>
+            <label class="field">
+              <span>Verification Token</span>
+              <input id="feishuVerificationToken" type="password" placeholder="留空则保留原值" />
+            </label>
+            <label class="field">
+              <span>Encrypt Key</span>
+              <input id="feishuEncryptKey" type="password" placeholder="未启用加密可留空" />
+            </label>
+            <div class="two-col">
+              <label class="field">
+                <span>测试类型</span>
+                <select id="feishuTestReceiveType">
+                  <option value="open_id">open_id</option>
+                  <option value="chat_id">chat_id</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>测试接收 ID</span>
+                <input id="feishuTestReceiveId" placeholder="open_id / chat_id" />
+              </label>
+            </div>
+            <div class="button-row">
+              <button id="saveFeishuBtn" class="primary">保存飞书配置</button>
+              <button id="testFeishuBtn">发送测试消息</button>
+            </div>
+          </div>
+        </details>
       </aside>
 
       <main class="workspace">

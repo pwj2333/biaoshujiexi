@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import io
 import json
+import base64
 import hashlib
 import hmac
 import re
 import subprocess
+import time
 import uuid
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
@@ -17,6 +19,11 @@ from zipfile import BadZipFile, ZipFile
 import httpx
 import uvicorn
 try:
+    from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+except ImportError:
+    Cipher = algorithms = modes = padding = None
+try:
     from docx import Document
     from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -27,7 +34,7 @@ except ImportError:
     Document = None
     WD_CELL_VERTICAL_ALIGNMENT = WD_TABLE_ALIGNMENT = WD_ALIGN_PARAGRAPH = None
     OxmlElement = qn = Inches = Pt = RGBColor = None
-from fastapi import Cookie, Depends, FastAPI, File, Header, HTTPException, Response, UploadFile
+from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook, load_workbook
@@ -44,18 +51,23 @@ DATA_DIR = BASE_DIR / 'data'
 TMP_DIR = DATA_DIR / 'tmp'
 PROJECTS_DIR = DATA_DIR / 'projects'
 MARKET_SKILL_DIR = DATA_DIR / 'market_skill'
+FEISHU_DIR = DATA_DIR / 'feishu'
+FEISHU_SESSIONS_DIR = FEISHU_DIR / 'sessions'
+FEISHU_EVENTS_DIR = FEISHU_DIR / 'events'
 CONFIG_PATH = DATA_DIR / 'config.json'
 USERS_PATH = DATA_DIR / 'users.json'
 PACKAGE_EXTRACTION_TEMPLATE_PATH = PACKAGE_TEMPLATE_DIR / 'extraction_template.xlsx'
 PACKAGE_REGISTER_TEMPLATE_PATH = PACKAGE_TEMPLATE_DIR / '招标登记.xlsx'
 SESSION_TTL = timedelta(hours=4)
+FEISHU_SESSION_TTL = timedelta(hours=24)
+FEISHU_EVENT_TTL = timedelta(days=7)
 AUTH_TTL = timedelta(hours=12)
 PASSWORD_SALT = 'ruico-bid-parser'
 DEFAULT_ADMIN_USERNAME = 'ruico'
 DEFAULT_ADMIN_PASSWORD = 'Ruico668@'
 AUTH_COOKIE_NAME = 'bid_parser_token'
 
-for folder in (DATA_DIR, TMP_DIR, PROJECTS_DIR, MARKET_SKILL_DIR):
+for folder in (DATA_DIR, TMP_DIR, PROJECTS_DIR, MARKET_SKILL_DIR, FEISHU_DIR, FEISHU_SESSIONS_DIR, FEISHU_EVENTS_DIR):
     folder.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title='标书解析与登记 Demo')
@@ -100,6 +112,26 @@ DEFAULT_CONFIG = {
     'api_key': '',
     'model': '',
     'temperature': 0.1,
+    'feishu_enabled': False,
+    'feishu_app_id': '',
+    'feishu_app_secret': '',
+    'feishu_verification_token': '',
+    'feishu_encrypt_key': '',
+    'feishu_allowed_open_ids': '',
+    'feishu_allowed_chat_ids': '',
+}
+
+FEISHU_TOKEN_CACHE: dict[str, Any] = {'token': '', 'expires_at': 0.0}
+FEISHU_TOOL_NAMES = {
+    'help',
+    'search_project',
+    'parse_bid_file',
+    'extract_cargo',
+    'extract_newbuilding',
+    'market_report_cargo',
+    'market_report_newbuilding',
+    'confirm_save_market_record',
+    'cancel_pending',
 }
 
 STATUS_LABELS = {'ok', '已明确满足', '需人工确认', '疑似风险/否决项'}
@@ -356,6 +388,19 @@ class ConfigPayload(BaseModel):
     api_key: str = ''
     model: str = ''
     temperature: float = 0.1
+    feishu_enabled: bool = False
+    feishu_app_id: str = ''
+    feishu_app_secret: str = ''
+    feishu_verification_token: str = ''
+    feishu_encrypt_key: str = ''
+    feishu_allowed_open_ids: str = ''
+    feishu_allowed_chat_ids: str = ''
+
+
+class FeishuTestPayload(BaseModel):
+    receive_id_type: str = 'open_id'
+    receive_id: str = ''
+    text: str = '标书解析机器人测试消息'
 
 
 class ChatPayload(BaseModel):
@@ -477,11 +522,21 @@ def load_config() -> dict[str, Any]:
 def save_config(payload: dict[str, Any]) -> dict[str, Any]:
     current = load_config()
     api_key = payload.get('api_key', '').strip() or current.get('api_key', '')
+    feishu_app_secret = payload.get('feishu_app_secret', '').strip() or current.get('feishu_app_secret', '')
+    feishu_verification_token = payload.get('feishu_verification_token', '').strip() or current.get('feishu_verification_token', '')
+    feishu_encrypt_key = payload.get('feishu_encrypt_key', '').strip() or current.get('feishu_encrypt_key', '')
     cleaned = {
         'base_url': payload.get('base_url', '').strip(),
         'api_key': api_key,
         'model': payload.get('model', '').strip(),
         'temperature': float(payload.get('temperature', 0.1) or 0.1),
+        'feishu_enabled': bool(payload.get('feishu_enabled')),
+        'feishu_app_id': payload.get('feishu_app_id', '').strip(),
+        'feishu_app_secret': feishu_app_secret,
+        'feishu_verification_token': feishu_verification_token,
+        'feishu_encrypt_key': feishu_encrypt_key,
+        'feishu_allowed_open_ids': payload.get('feishu_allowed_open_ids', '').strip(),
+        'feishu_allowed_chat_ids': payload.get('feishu_allowed_chat_ids', '').strip(),
     }
     CONFIG_PATH.write_text(
         json.dumps(cleaned, ensure_ascii=False, indent=2),
@@ -495,6 +550,10 @@ def mask_config(config: dict[str, Any]) -> dict[str, Any]:
     masked['has_api_key'] = bool(masked.get('api_key'))
     if masked.get('api_key'):
         masked['api_key'] = '*' * 8
+    for key in ('feishu_app_secret', 'feishu_verification_token', 'feishu_encrypt_key'):
+        masked[f'has_{key}'] = bool(masked.get(key))
+        if masked.get(key):
+            masked[key] = '*' * 8
     return masked
 
 
@@ -1163,6 +1222,496 @@ def parse_ai_document(document_text: str, config: dict[str, Any]) -> dict[str, A
     result['document_text_full'] = document_text
     result['document_text_excerpt'] = document_text[:12000]
     return result
+
+
+def split_config_list(value: Any) -> set[str]:
+    return {item.strip() for item in re.split(r'[\s,;，；]+', str(value or '')) if item.strip()}
+
+
+def safe_feishu_id(value: str) -> str:
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def read_json_file(path: Path, default: Any) -> Any:
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def write_json_file(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def cleanup_feishu_files() -> None:
+    now = datetime.now()
+    for folder, ttl in ((FEISHU_SESSIONS_DIR, FEISHU_SESSION_TTL), (FEISHU_EVENTS_DIR, FEISHU_EVENT_TTL)):
+        for path in folder.glob('*.json'):
+            try:
+                mtime = datetime.fromtimestamp(path.stat().st_mtime)
+            except OSError:
+                continue
+            if now - mtime > ttl:
+                path.unlink(missing_ok=True)
+
+
+def feishu_session_path(open_id: str, chat_id: str) -> Path:
+    key = open_id or chat_id or 'anonymous'
+    return FEISHU_SESSIONS_DIR / f'{safe_feishu_id(key)}.json'
+
+
+def load_feishu_session(open_id: str, chat_id: str) -> dict[str, Any]:
+    cleanup_feishu_files()
+    return read_json_file(feishu_session_path(open_id, chat_id), {})
+
+
+def save_feishu_session(open_id: str, chat_id: str, session: dict[str, Any]) -> None:
+    session['updated_at'] = datetime.now().isoformat(timespec='seconds')
+    write_json_file(feishu_session_path(open_id, chat_id), session)
+
+
+def clear_feishu_session(open_id: str, chat_id: str) -> None:
+    feishu_session_path(open_id, chat_id).unlink(missing_ok=True)
+
+
+def feishu_event_seen(event_key: str) -> bool:
+    cleanup_feishu_files()
+    if not event_key:
+        return False
+    path = FEISHU_EVENTS_DIR / f'{safe_feishu_id(event_key)}.json'
+    if path.exists():
+        return True
+    write_json_file(path, {'event_key': event_key, 'created_at': datetime.now().isoformat(timespec='seconds')})
+    return False
+
+
+def decrypt_feishu_payload(encrypted: str, encrypt_key: str) -> dict[str, Any]:
+    if Cipher is None or algorithms is None or modes is None or padding is None:
+        raise HTTPException(status_code=500, detail='缺少 cryptography 依赖，无法解密飞书事件。')
+    key = hashlib.sha256(encrypt_key.encode('utf-8')).digest()
+    try:
+        cipher_text = base64.b64decode(encrypted)
+        decryptor = Cipher(algorithms.AES(key), modes.CBC(key[:16])).decryptor()
+        padded = decryptor.update(cipher_text) + decryptor.finalize()
+        unpadder = padding.PKCS7(128).unpadder()
+        plain = unpadder.update(padded) + unpadder.finalize()
+        return json.loads(plain.decode('utf-8'))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail='飞书事件解密失败，请检查 Encrypt Key。') from exc
+
+
+def load_feishu_event_payload(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    if payload.get('encrypt'):
+        encrypt_key = config.get('feishu_encrypt_key', '')
+        if not encrypt_key:
+            raise HTTPException(status_code=400, detail='飞书事件已加密，但系统未配置 Encrypt Key。')
+        return decrypt_feishu_payload(str(payload.get('encrypt') or ''), encrypt_key)
+    return payload
+
+
+def verify_feishu_token(payload: dict[str, Any], config: dict[str, Any]) -> bool:
+    expected = config.get('feishu_verification_token', '')
+    if not expected:
+        return True
+    actual = payload.get('token') or (payload.get('header') or {}).get('token')
+    return hmac.compare_digest(str(actual or ''), str(expected))
+
+
+def extract_feishu_text(content: Any) -> str:
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except json.JSONDecodeError:
+            return content.strip()
+    if not isinstance(content, dict):
+        return ''
+    if isinstance(content.get('text'), str):
+        return content['text'].strip()
+    if isinstance(content.get('title'), str):
+        return content['title'].strip()
+    return ''
+
+
+def collect_feishu_files(content: Any) -> list[dict[str, str]]:
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(content, dict):
+        return []
+    files: list[dict[str, str]] = []
+    keys = ('file_key', 'fileKey', 'image_key', 'media_id')
+    if any(content.get(key) for key in keys):
+        files.append(
+            {
+                'file_key': str(next((content.get(key) for key in keys if content.get(key)), '')),
+                'file_name': str(content.get('file_name') or content.get('name') or content.get('title') or 'feishu_file'),
+                'file_type': str(content.get('file_type') or content.get('type') or ''),
+            }
+        )
+    for value in content.values():
+        if isinstance(value, list):
+            for item in value:
+                files.extend(collect_feishu_files(item))
+        elif isinstance(value, dict):
+            files.extend(collect_feishu_files(value))
+    unique: dict[str, dict[str, str]] = {}
+    for item in files:
+        if item.get('file_key'):
+            unique[item['file_key']] = item
+    return list(unique.values())
+
+
+def extract_feishu_message(payload: dict[str, Any]) -> dict[str, Any] | None:
+    event = payload.get('event') if isinstance(payload.get('event'), dict) else payload
+    message = event.get('message') if isinstance(event.get('message'), dict) else {}
+    sender = event.get('sender') if isinstance(event.get('sender'), dict) else {}
+    sender_id = sender.get('sender_id') if isinstance(sender.get('sender_id'), dict) else {}
+    header = payload.get('header') if isinstance(payload.get('header'), dict) else {}
+    message_id = str(message.get('message_id') or event.get('message_id') or '')
+    content = message.get('content') or event.get('content') or {}
+    return {
+        'event_id': str(header.get('event_id') or payload.get('uuid') or event.get('event_id') or message_id),
+        'event_type': str(header.get('event_type') or payload.get('type') or ''),
+        'message_id': message_id,
+        'message_type': str(message.get('message_type') or event.get('message_type') or ''),
+        'chat_id': str(message.get('chat_id') or event.get('open_chat_id') or event.get('chat_id') or ''),
+        'open_id': str(sender_id.get('open_id') or event.get('open_id') or ''),
+        'text': extract_feishu_text(content),
+        'files': collect_feishu_files(content),
+    }
+
+
+def feishu_token(config: dict[str, Any]) -> str:
+    now = time.time()
+    if FEISHU_TOKEN_CACHE.get('token') and float(FEISHU_TOKEN_CACHE.get('expires_at') or 0) > now + 60:
+        return str(FEISHU_TOKEN_CACHE['token'])
+    if not config.get('feishu_app_id') or not config.get('feishu_app_secret'):
+        raise HTTPException(status_code=400, detail='飞书 App ID 或 App Secret 未配置。')
+    response = httpx.post(
+        'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
+        json={'app_id': config['feishu_app_id'], 'app_secret': config['feishu_app_secret']},
+        timeout=20,
+    )
+    data = response.json()
+    if response.status_code >= 400 or data.get('code') != 0:
+        raise HTTPException(status_code=502, detail=f"飞书 tenant_access_token 获取失败：{data.get('msg') or response.text[:120]}")
+    FEISHU_TOKEN_CACHE['token'] = data['tenant_access_token']
+    FEISHU_TOKEN_CACHE['expires_at'] = now + int(data.get('expire') or 7200)
+    return str(FEISHU_TOKEN_CACHE['token'])
+
+
+def feishu_headers(config: dict[str, Any]) -> dict[str, str]:
+    return {'Authorization': f'Bearer {feishu_token(config)}', 'Content-Type': 'application/json; charset=utf-8'}
+
+
+def feishu_reply_message(config: dict[str, Any], message_id: str, text: str) -> None:
+    if not message_id:
+        return
+    safe_text = sanitize_feishu_reply(text)
+    response = httpx.post(
+        f'https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply',
+        headers=feishu_headers(config),
+        json={'msg_type': 'text', 'content': json.dumps({'text': safe_text}, ensure_ascii=False)},
+        timeout=20,
+    )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f'飞书消息回复失败：{response.status_code} {response.text[:160]}')
+
+
+def feishu_send_message(config: dict[str, Any], receive_id_type: str, receive_id: str, text: str) -> None:
+    if receive_id_type not in {'open_id', 'chat_id'}:
+        raise HTTPException(status_code=400, detail='receive_id_type 仅支持 open_id 或 chat_id。')
+    if not receive_id:
+        raise HTTPException(status_code=400, detail='请填写接收人的 open_id 或群 chat_id。')
+    response = httpx.post(
+        f'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}',
+        headers=feishu_headers(config),
+        json={
+            'receive_id': receive_id,
+            'msg_type': 'text',
+            'content': json.dumps({'text': sanitize_feishu_reply(text)}, ensure_ascii=False),
+        },
+        timeout=20,
+    )
+    data = {}
+    try:
+        data = response.json()
+    except json.JSONDecodeError:
+        pass
+    if response.status_code >= 400 or (data and data.get('code') not in (0, None)):
+        raise HTTPException(status_code=502, detail=f"飞书测试消息发送失败：{data.get('msg') if data else response.text[:160]}")
+
+
+def feishu_download_file(config: dict[str, Any], message_id: str, file_key: str, file_name: str = '') -> Path:
+    suffix = Path(file_name or '').suffix.lower()
+    if suffix not in {'.pdf', '.doc', '.docx', '.xls', '.xlsx'}:
+        suffix = '.bin'
+    temp_path = TMP_DIR / f'{uuid.uuid4().hex}{suffix}'
+    urls = [
+        f'https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/resources/{file_key}?type=file',
+        f'https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/resources/{file_key}?type=docx',
+    ]
+    last_error = ''
+    for url in urls:
+        response = httpx.get(url, headers={'Authorization': f'Bearer {feishu_token(config)}'}, timeout=60)
+        if response.status_code < 400 and response.content:
+            temp_path.write_bytes(response.content)
+            return temp_path
+        last_error = f'{response.status_code} {response.text[:120]}'
+    raise HTTPException(status_code=502, detail=f'飞书文件下载失败：{last_error}')
+
+
+def sanitize_feishu_reply(text: Any) -> str:
+    value = str(text or '')
+    api_key = load_config().get('api_key', '')
+    if api_key:
+        value = value.replace(api_key, '[hidden]')
+    for key in ('feishu_app_secret', 'feishu_verification_token', 'feishu_encrypt_key'):
+        secret = load_config().get(key, '')
+        if secret:
+            value = value.replace(secret, '[hidden]')
+    value = value.replace(str(BASE_DIR), '[project]')
+    return value[:3800]
+
+
+def feishu_help_text() -> str:
+    return (
+        '标书解析机器人可用指令：\n'
+        '1. 帮助\n'
+        '2. 查询 福海创\n'
+        '3. 4000吨甲苯，张家港～东莞，月内装出\n'
+        '4. 新造船资讯：船名/船厂/船东/DWT/状态...\n'
+        '5. 生成本月商机市场分析\n'
+        '6. 生成本月新造船市场分析\n'
+        '7. 发送标书文件并输入“解析标书”\n'
+        '下一步：直接发送你要处理的内容；识别出的市场情报不会自动保存，回复“确认保存”才入库。'
+    )
+
+
+def feishu_period_from_text(text: str) -> tuple[str, str, str]:
+    now = datetime.now()
+    if '本周' in text:
+        start = now - timedelta(days=now.weekday())
+        return 'weekly', start.strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d')
+    if '上月' in text:
+        first = now.replace(day=1)
+        end = first - timedelta(days=1)
+        start = end.replace(day=1)
+        return 'monthly', start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
+    if '本月' in text or '月' in text:
+        return 'monthly', now.replace(day=1).strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d')
+    return 'custom', '', ''
+
+
+def heuristic_feishu_route(text: str, files: list[dict[str, str]]) -> dict[str, Any]:
+    stripped = text.strip()
+    compact = stripped.replace(' ', '')
+    if compact.lower() in {'help', '帮助', '菜单'}:
+        return {'tool': 'help', 'arguments': {}}
+    if compact in {'确认保存', '确认', '保存'}:
+        return {'tool': 'confirm_save_market_record', 'arguments': {}}
+    if compact in {'取消', '取消保存', '放弃'}:
+        return {'tool': 'cancel_pending', 'arguments': {}}
+    if files and any(word in stripped for word in ['解析', '标书', '招标']):
+        return {'tool': 'parse_bid_file', 'arguments': {}}
+    if any(word in stripped for word in ['新造船', '船厂', '造船', 'DWT', 'dwt', '完造', '出厂', '投运']):
+        if any(word in stripped for word in ['分析', '报告', '周报', '月报']):
+            period, start_date, end_date = feishu_period_from_text(stripped)
+            return {'tool': 'market_report_newbuilding', 'arguments': {'period': period, 'start_date': start_date, 'end_date': end_date}}
+        return {'tool': 'extract_newbuilding', 'arguments': {'text': stripped}}
+    if '商机' in stripped and any(word in stripped for word in ['分析', '报告', '周报', '月报', '市场']):
+        period, start_date, end_date = feishu_period_from_text(stripped)
+        return {'tool': 'market_report_cargo', 'arguments': {'period': period, 'start_date': start_date, 'end_date': end_date}}
+    if any(word in stripped for word in ['货盘', '吨', '装出', '装港', '卸港', '～', '~', '->']):
+        return {'tool': 'extract_cargo', 'arguments': {'text': stripped}}
+    if any(word in stripped for word in ['查询', '查找', '搜索']):
+        keyword = re.sub(r'^(查询|查找|搜索)', '', stripped).replace('项目', '').strip()
+        return {'tool': 'search_project', 'arguments': {'q': keyword or stripped}}
+    return {'tool': 'search_project', 'arguments': {'q': stripped}}
+
+
+def ai_feishu_route(text: str, files: list[dict[str, str]], config: dict[str, Any]) -> dict[str, Any]:
+    if not (config.get('base_url') and config.get('api_key') and config.get('model')):
+        return heuristic_feishu_route(text, files)
+    prompt = json.dumps(
+        {
+            'text': text,
+            'files': files,
+            'tools': sorted(FEISHU_TOOL_NAMES),
+            'required_json': {'tool': 'help', 'arguments': {}},
+        },
+        ensure_ascii=False,
+    )
+    try:
+        content = call_chat_completion(
+            config,
+            system_prompt=(
+                '你是飞书机器人指令路由器，只能输出严格 JSON。'
+                'tool 必须是给定白名单之一；arguments 只能放工具需要的参数；'
+                '保存、删除、覆盖类动作不要直接执行，必须路由到确认或取消。'
+                '最终回复由后端生成，后端会提醒用户下一步操作。'
+            ),
+            user_prompt=prompt,
+            temperature=0,
+        )
+        route = parse_json_text(content)
+    except HTTPException:
+        return heuristic_feishu_route(text, files)
+    tool = str(route.get('tool') or '')
+    if tool not in FEISHU_TOOL_NAMES:
+        return heuristic_feishu_route(text, files)
+    arguments = route.get('arguments') if isinstance(route.get('arguments'), dict) else {}
+    return {'tool': tool, 'arguments': arguments}
+
+
+def format_project_search(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return '没有查到匹配的历史项目。\n下一步：请换一个项目关键词，或到网页端历史台账确认是否已保存。'
+    lines = ['查询到以下历史项目：']
+    for index, item in enumerate(items[:5], start=1):
+        lines.append(
+            f"{index}. {item.get('title') or item.get('project_name') or '未命名项目'}\n"
+            f"   招标编号：{item.get('bid_no') or '-'}\n"
+            f"   招标人：{item.get('tenderer') or '-'}\n"
+            f"   投标状态：{item.get('bid_status') or '-'}，中标状态：{item.get('award_status') or '-'}"
+        )
+    lines.append('\n下一步：如果要看详情，请在网页端打开历史台账；如果要查其他项目，继续发送“查询 项目名”。')
+    return '\n'.join(lines)
+
+
+def format_market_record(kind: str, record: dict[str, Any]) -> str:
+    if kind == 'cargo':
+        lines = [
+            '已识别商机货盘草稿：',
+            f"货品：{record.get('cargo_name') or '-'}",
+            f"吨数：{record.get('tonnage') or '-'}",
+            f"航线：{record.get('load_port') or '-'} -> {record.get('discharge_port') or '-'}",
+            f"装载期：{record.get('laycan') or '-'}",
+            f"货主：{record.get('cargo_owner') or '-'}",
+            f"板块：{record.get('segment') or '-'}，类型：{record.get('board_type') or '-'}",
+        ]
+    else:
+        lines = [
+            '已识别新造船资讯草稿：',
+            f"船名：{record.get('ship_name') or '-'}",
+            f"船厂：{record.get('shipyard') or '-'}",
+            f"船东：{record.get('owner') or '-'}",
+            f"DWT：{record.get('dwt') or '-'}",
+            f"阶段：{record.get('stage') or '-'}",
+            f"预计交付：{record.get('delivery_time') or '-'}",
+        ]
+    lines.append('下一步：请核对字段；回复“确认保存”写入市场情报台账，或回复“取消”放弃。')
+    return '\n'.join(lines)
+
+
+def format_market_report(report: dict[str, Any]) -> str:
+    lines = [str(report.get('summary') or '已生成市场分析报告。')]
+    for title, key in [('关键发现', 'key_findings'), ('风险提示', 'risks'), ('经营建议', 'recommendations')]:
+        values = [str(item) for item in (report.get(key) or []) if str(item).strip()]
+        if values:
+            lines.append(f'\n{title}：')
+            lines.extend(f'- {item}' for item in values[:5])
+    lines.append('\n下一步：如需沉淀报告或导出 Word/Excel，请到网页端“市场情报”模块导出；也可以继续发送新的时间范围生成分析。')
+    return '\n'.join(lines)
+
+
+def format_bid_result(result: dict[str, Any]) -> str:
+    summary = result.get('document_summary') or {}
+    analysis = result.get('analysis') or {}
+    risks = analysis.get('risks') or []
+    return (
+        '标书解析完成：\n'
+        f"项目名称：{summary.get('project_name') or '-'}\n"
+        f"招标编号：{summary.get('bid_no') or '-'}\n"
+        f"招标人：{summary.get('tenderer') or '-'}\n"
+        f"投标截止：{summary.get('bid_deadline') or '-'}\n"
+        f"保证金：{summary.get('deposit_amount') or '-'}\n"
+        f"资格要求：{compact_paragraph(summary.get('qualification_requirements'))[:600] or '-'}\n"
+        f"风险提示：{'；'.join(map(str, risks[:5])) or '-'}\n"
+        '下一步：文件未自动入历史，请到网页端核对摘取结果、导出 Excel，并确认是否保存到历史台账。'
+    )
+
+
+def execute_feishu_tool(route: dict[str, Any], message: dict[str, Any], config: dict[str, Any]) -> str:
+    tool = route.get('tool')
+    args = route.get('arguments') if isinstance(route.get('arguments'), dict) else {}
+    text = args.get('text') or message.get('text') or ''
+    open_id = message.get('open_id', '')
+    chat_id = message.get('chat_id', '')
+    if tool == 'help':
+        return feishu_help_text()
+    if tool == 'cancel_pending':
+        clear_feishu_session(open_id, chat_id)
+        return '已取消当前待确认内容。'
+    if tool == 'confirm_save_market_record':
+        session = load_feishu_session(open_id, chat_id)
+        pending = session.get('pending') if isinstance(session.get('pending'), dict) else {}
+        if pending.get('type') != 'market_record':
+            return '当前没有待保存内容。\n下一步：请先发送商机货盘或新造船资讯，我识别成草稿后再回复“确认保存”。'
+        record = save_market_record(str(pending.get('kind') or ''), pending.get('record') or {})
+        clear_feishu_session(open_id, chat_id)
+        return f"已保存到市场情报台账：{record.get('id')}\n下一步：可继续发送新的商机/新造船信息，或到网页端查看台账、统计和导出。"
+    if tool == 'search_project':
+        items, _ = collect_project_items(q=str(args.get('q') or text))
+        return format_project_search(items)
+    if tool in {'extract_cargo', 'extract_newbuilding'}:
+        kind = 'cargo' if tool == 'extract_cargo' else 'newbuilding'
+        record = extract_market_record(kind, str(text))
+        save_feishu_session(
+            open_id,
+            chat_id,
+            {'pending': {'type': 'market_record', 'kind': kind, 'record': record, 'created_at': datetime.now().isoformat(timespec='seconds')}},
+        )
+        return format_market_record(kind, record)
+    if tool in {'market_report_cargo', 'market_report_newbuilding'}:
+        kind = 'cargo' if tool == 'market_report_cargo' else 'newbuilding'
+        report = build_market_report(
+            MarketReportPayload(
+                kind=kind,
+                period=str(args.get('period') or 'custom'),
+                start_date=str(args.get('start_date') or ''),
+                end_date=str(args.get('end_date') or ''),
+                filters=args.get('filters') if isinstance(args.get('filters'), dict) else {},
+            )
+        )
+        return format_market_report(report)
+    if tool == 'parse_bid_file':
+        files = message.get('files') or []
+        if not files:
+            return '请在飞书里同时发送标书文件，并输入“解析标书”。\n下一步：上传 PDF/DOC/DOCX/XLS/XLSX 后再发“解析标书”。'
+        file_info = files[0]
+        temp_path = feishu_download_file(config, message.get('message_id', ''), file_info.get('file_key', ''), file_info.get('file_name', ''))
+        try:
+            suffix = Path(file_info.get('file_name') or temp_path.name).suffix.lower() or temp_path.suffix.lower()
+            if suffix not in {'.pdf', '.doc', '.docx', '.xls', '.xlsx'}:
+                raise HTTPException(status_code=400, detail='当前仅支持 PDF、DOC、DOCX、XLS、XLSX 标书文件。')
+            document_text = extract_document_text(temp_path, suffix)
+            if len(document_text.strip()) < 80:
+                raise HTTPException(status_code=400, detail='当前版本仅支持可提取文本的标书文件，扫描件暂不支持。')
+            return format_bid_result(parse_ai_document(document_text, require_config()))
+        finally:
+            temp_path.unlink(missing_ok=True)
+    return feishu_help_text()
+
+
+def handle_feishu_message(message: dict[str, Any], config: dict[str, Any]) -> str:
+    route = ai_feishu_route(message.get('text', ''), message.get('files') or [], config)
+    return execute_feishu_tool(route, message, config)
+
+
+def process_feishu_event(message: dict[str, Any], config: dict[str, Any]) -> None:
+    try:
+        reply = handle_feishu_message(message, config)
+    except Exception as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        reply = f'处理失败：{detail}'
+    try:
+        feishu_reply_message(config, message.get('message_id', ''), reply)
+    except Exception as exc:
+        print(f'Feishu reply failed: {exc}')
 
 
 def parse_excel_date(value: str) -> Any:
@@ -2821,6 +3370,41 @@ def test_config(payload: ConfigPayload, _: dict[str, Any] = Depends(require_auth
         temperature=0,
     )
     return {'ok': 'OK' in content.upper(), 'message': content.strip()}
+
+
+@app.post('/api/feishu/test-message')
+def test_feishu_message(payload: FeishuTestPayload, _: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    config = load_config()
+    if not config.get('feishu_enabled'):
+        raise HTTPException(status_code=400, detail='请先启用飞书机器人。')
+    feishu_send_message(config, payload.receive_id_type, payload.receive_id.strip(), payload.text)
+    return {'ok': True}
+
+
+@app.post('/api/feishu/events')
+async def feishu_events(request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    config = load_config()
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail='飞书事件 JSON 无效。')
+    payload = load_feishu_event_payload(payload, config)
+    if not verify_feishu_token(payload, config):
+        raise HTTPException(status_code=403, detail='飞书 verification token 校验失败。')
+    if payload.get('type') == 'url_verification':
+        return {'challenge': payload.get('challenge', '')}
+    if not config.get('feishu_enabled'):
+        return {'ok': True, 'ignored': 'disabled'}
+    if not config.get('feishu_verification_token'):
+        return {'ok': True, 'ignored': 'missing_verification_token'}
+    message = extract_feishu_message(payload)
+    if not message or (message.get('event_type') and message.get('event_type') != 'im.message.receive_v1'):
+        return {'ok': True, 'ignored': 'unsupported_event'}
+    event_key = message.get('event_id') or message.get('message_id')
+    if feishu_event_seen(event_key):
+        return {'ok': True, 'duplicate': True}
+    background_tasks.add_task(process_feishu_event, message, config)
+    return {'ok': True}
 
 
 @app.get('/api/projects')
