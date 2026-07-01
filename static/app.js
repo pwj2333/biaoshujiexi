@@ -1371,9 +1371,6 @@ function ensureDefaultTracking() {
 async function parseFile() {
   const file = $('fileInput').files[0];
   if (!file) throw new Error('请先选择标书文件');
-  if (!$('baseUrl').value.trim() || !$('modelName').value.trim() || !$('apiKey').value.trim()) {
-    throw new Error('请先填写并保存 AI 配置，至少需要 Base URL、模型名称和 API Key。');
-  }
   if (hasConfigFormValues()) {
     await saveConfig();
   }
