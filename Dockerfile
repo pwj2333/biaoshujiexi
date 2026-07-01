@@ -15,7 +15,9 @@ COPY static ./static
 COPY templates ./templates
 COPY 模板文件 ./模板文件
 
-RUN mkdir -p /app/data/tmp /app/data/projects
+RUN mkdir -p /app/data/tmp /app/data/projects /app/data/market_skill /app/data/feishu
+
+VOLUME ["/app/data"]
 
 EXPOSE 8008
 

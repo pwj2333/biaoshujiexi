@@ -738,10 +738,12 @@ function renderProjectList() {
       `
     )
     .join('');
-  document.querySelectorAll('.project-item').forEach((node) => {
+  document.querySelectorAll('#projectList [data-project-id]').forEach((node) => {
     node.onclick = async () => {
       try {
-        await loadProject(node.dataset.projectId);
+        const projectId = node.dataset.projectId || '';
+        if (!projectId) throw new Error('项目 ID 无效。');
+        await loadProject(projectId);
       } catch (error) {
         showToast(error.message, true);
       }
@@ -1040,7 +1042,7 @@ function renderMarketList() {
           ? `${item.tonnage || '-'} | ${item.cargo_owner || '-'} | ${item.final_price || '未录成交价'}`
           : `${item.dwt || '-'} | ${item.owner || '-'} | ${item.delivery_time || '-'}`;
       return `
-        <button class="project-item ${item.id === state.marketCurrentId ? 'active' : ''}" data-market-id="${item.id}">
+        <button class="project-item market-item ${item.id === state.marketCurrentId ? 'active' : ''}" data-market-id="${item.id}">
           <div class="project-card-head">
             <strong>${title}</strong>
             <span class="status-chip ${chip === '已成交' || chip === '已完造并出厂投运' ? 'ok' : chip === '未成交' || chip === '放弃' ? 'error' : 'warn'}">${chip || '-'}</span>
@@ -1058,7 +1060,9 @@ function renderMarketList() {
   document.querySelectorAll('[data-market-id]').forEach((node) => {
     node.onclick = async () => {
       try {
-        const result = await request(`/api/market-skill/${state.marketKind}/${node.dataset.marketId}`);
+        const marketId = node.dataset.marketId || '';
+        if (!marketId) throw new Error('市场情报记录 ID 无效。');
+        const result = await request(`/api/market-skill/${state.marketKind}/${marketId}`);
         setMarketRecord(result.record, { persisted: true });
         renderMarketList();
       } catch (error) {

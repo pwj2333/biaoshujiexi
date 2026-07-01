@@ -1965,6 +1965,8 @@ def feishu_dialog_defaults() -> dict[str, Any]:
         'last_question': '',
         'retry_count': 0,
         'last_result': {},
+        'agent_summary': '',
+        'last_tool_result': {},
     }
 
 
@@ -1984,6 +1986,8 @@ def feishu_dialog_load(open_id: str, chat_id: str) -> dict[str, Any]:
     session['last_question'] = compact_text(session.get('last_question'))
     session['retry_count'] = int(session.get('retry_count') or 0)
     session['last_result'] = session.get('last_result') if isinstance(session.get('last_result'), dict) else {}
+    session['agent_summary'] = compact_text(session.get('agent_summary'))
+    session['last_tool_result'] = session.get('last_tool_result') if isinstance(session.get('last_tool_result'), dict) else {}
     return session
 
 
@@ -1998,6 +2002,8 @@ def feishu_dialog_save(open_id: str, chat_id: str, session: dict[str, Any]) -> N
     payload['last_question'] = compact_text(payload.get('last_question'))
     payload['retry_count'] = int(payload.get('retry_count') or 0)
     payload['last_result'] = payload.get('last_result') if isinstance(payload.get('last_result'), dict) else {}
+    payload['agent_summary'] = compact_text(payload.get('agent_summary'))
+    payload['last_tool_result'] = payload.get('last_tool_result') if isinstance(payload.get('last_tool_result'), dict) else {}
     save_feishu_session(open_id, chat_id, payload)
 
 
@@ -2238,6 +2244,254 @@ def feishu_skill_reply_prefix(skill: str, action: str, missing: list[str]) -> st
     elif action == 'cancel':
         lines.append('已取消当前待办。')
     return '\n'.join(lines)
+
+
+FEISHU_AGENT_TOOLS = {
+    'chat_general',
+    'extract_cargo_opportunity',
+    'extract_newbuilding_info',
+    'update_pending_record',
+    'save_pending_record',
+    'search_project',
+    'parse_bid_file',
+    'answer_bid_question',
+    'generate_market_report',
+    'cancel_pending',
+}
+
+
+def require_ai_chat_config(config: dict[str, Any]) -> None:
+    if not (config.get('base_url') and config.get('api_key') and config.get('model')):
+        raise HTTPException(status_code=400, detail='AI 暂不可用：请先在网页端 AI 配置中保存 Base URL、API Key 和模型名称。')
+
+
+def feishu_agent_session_view(session: dict[str, Any]) -> dict[str, Any]:
+    pending = session.get('pending_confirm') if isinstance(session.get('pending_confirm'), dict) else {}
+    pending_record = pending.get('record') if isinstance(pending.get('record'), dict) else {}
+    return {
+        'active_skill': session.get('active_skill', ''),
+        'agent_summary': session.get('agent_summary', ''),
+        'last_question': session.get('last_question', ''),
+        'has_pending_record': bool(pending_record),
+        'pending_kind': pending.get('kind', ''),
+        'pending_record': pending_record,
+        'has_bid_result': bool(session.get('last_result') and session.get('active_skill') == 'bid_parse'),
+        'last_tool_result': session.get('last_tool_result', {}),
+    }
+
+
+def feishu_agent_decision_prompt(text: str, files: list[dict[str, str]], session: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            'user_text': text,
+            'files': files,
+            'session': feishu_agent_session_view(session),
+            'available_tools': sorted(FEISHU_AGENT_TOOLS),
+            'tool_policy': {
+                'chat_general': '普通聊天、寒暄、解释系统能力、无法判断业务动作时使用。普通聊天必须用这个工具，不要返回固定菜单。',
+                'extract_cargo_opportunity': '从货盘/商机文本识别商机草稿，但不保存。',
+                'extract_newbuilding_info': '从新造船资讯识别草稿，但不保存。',
+                'update_pending_record': '用户正在修改当前草稿，例如“装港改成宁波”。',
+                'save_pending_record': '用户明确确认保存当前草稿时使用。',
+                'search_project': '查询历史项目。',
+                'parse_bid_file': '用户上传标书文件并要求解析时使用。',
+                'answer_bid_question': '已有最近标书解析结果，用户继续追问标书内容时使用。',
+                'generate_market_report': '生成商机或新造船市场分析报告。',
+                'cancel_pending': '用户取消当前草稿或待办。',
+            },
+            'required_json': {
+                'reply': '',
+                'tool_calls': [{'name': 'chat_general', 'arguments': {}}],
+                'needs_confirmation': False,
+                'pending_update': {},
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def feishu_agent_decide(text: str, files: list[dict[str, str]], session: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    require_ai_chat_config(config)
+    system_prompt = (
+        '你是飞书里的业务 AI Agent。用户是在和配置好的 AI 自然对话，不是在操作固定菜单。'
+        '你必须先理解用户消息，再决定是否调用后端白名单工具。'
+        '普通聊天、寒暄、泛泛提问必须调用 chat_general，由 AI 自然回复，不要返回固定菜单。'
+        '保存、写入类动作只有用户明确确认时才能调用 save_pending_record。'
+        '如果需要工具，只输出 JSON，不要 Markdown。tool_calls 最多 2 个。'
+        '工具名必须来自 available_tools；如果不确定，用 chat_general。'
+    )
+    content = call_chat_completion(
+        config,
+        system_prompt=system_prompt,
+        user_prompt=feishu_agent_decision_prompt(text, files, session),
+        temperature=0,
+    )
+    try:
+        decision = parse_json_text(content)
+    except HTTPException:
+        return {'reply': '', 'tool_calls': [{'name': 'chat_general', 'arguments': {}}], 'needs_confirmation': False, 'pending_update': {}}
+    tool_calls = decision.get('tool_calls') if isinstance(decision.get('tool_calls'), list) else []
+    cleaned_calls: list[dict[str, Any]] = []
+    for call in tool_calls[:2]:
+        if not isinstance(call, dict):
+            continue
+        name = compact_text(call.get('name'))
+        if name not in FEISHU_AGENT_TOOLS:
+            continue
+        args = call.get('arguments') if isinstance(call.get('arguments'), dict) else {}
+        cleaned_calls.append({'name': name, 'arguments': args})
+    if not cleaned_calls:
+        cleaned_calls = [{'name': 'chat_general', 'arguments': {}}]
+    return {
+        'reply': compact_text(decision.get('reply')),
+        'tool_calls': cleaned_calls,
+        'needs_confirmation': bool(decision.get('needs_confirmation')),
+        'pending_update': decision.get('pending_update') if isinstance(decision.get('pending_update'), dict) else {},
+    }
+
+
+def feishu_agent_chat_reply(text: str, session: dict[str, Any], config: dict[str, Any], tool_results: list[dict[str, Any]] | None = None) -> str:
+    require_ai_chat_config(config)
+    prompt = json.dumps(
+        {
+            'user_text': text,
+            'session': feishu_agent_session_view(session),
+            'tool_results': tool_results or [],
+            'reply_rules': [
+                '用自然中文回复，像一个可协作的业务 AI 助手。',
+                '不要说自己是固定菜单机器人。',
+                '如果工具已生成草稿，简洁列出关键字段并提示确认保存或继续修改。',
+                '如果没有工具结果，就正常回答用户问题。',
+            ],
+        },
+        ensure_ascii=False,
+    )
+    return call_chat_completion(
+        config,
+        system_prompt='你是飞书里的业务 AI Agent，负责自然回复用户，并在需要时说明系统已完成的操作。',
+        user_prompt=prompt,
+        temperature=0.3,
+    ).strip()
+
+
+def feishu_agent_merge_record(kind: str, current: dict[str, Any], text: str) -> dict[str, Any]:
+    update = extract_market_record(kind, text)
+    merged = dict(current)
+    for key, value in update.items():
+        if key in {'id', 'kind', 'created_at', 'updated_at'}:
+            continue
+        if compact_text(value):
+            merged[key] = value
+    raw_parts = [compact_text(current.get('raw_text')), text]
+    merged['raw_text'] = '\n'.join(part for part in raw_parts if part)
+    return normalize_market_record(kind, merged, record_id=compact_text(current.get('id')), created_at=compact_text(current.get('created_at')))
+
+
+def feishu_agent_execute_tool(call: dict[str, Any], message: dict[str, Any], session: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    name = compact_text(call.get('name'))
+    args = call.get('arguments') if isinstance(call.get('arguments'), dict) else {}
+    text = compact_text(args.get('text') or message.get('text') or '')
+    files = message.get('files') or []
+
+    if name == 'chat_general':
+        return {'tool': name, 'ok': True, 'reply': feishu_agent_chat_reply(text, session, config)}
+
+    if name == 'cancel_pending':
+        session.update({'active_skill': '', 'seed_text': '', 'slots': {}, 'missing': [], 'pending_confirm': {}, 'last_question': text})
+        return {'tool': name, 'ok': True, 'reply': '已取消当前待办。你可以继续发新内容，我会重新理解。'}
+
+    if name == 'save_pending_record':
+        pending = session.get('pending_confirm') if isinstance(session.get('pending_confirm'), dict) else {}
+        if pending.get('type') != 'market_record':
+            return {'tool': name, 'ok': False, 'error': '当前没有可保存的草稿。'}
+        record = save_market_record(str(pending.get('kind') or ''), pending.get('record') or {})
+        session.update({'active_skill': '', 'seed_text': '', 'slots': {}, 'missing': [], 'pending_confirm': {}, 'last_tool_result': {'saved_record_id': record.get('id')}})
+        return {'tool': name, 'ok': True, 'record': record, 'reply': f"已保存到市场情报台账，记录 ID：{record.get('id')}"}
+
+    if name in {'extract_cargo_opportunity', 'extract_newbuilding_info'}:
+        kind = 'cargo' if name == 'extract_cargo_opportunity' else 'newbuilding'
+        skill = 'cargo_opportunity' if kind == 'cargo' else 'newbuilding_info'
+        record = extract_market_record(kind, text)
+        missing = feishu_skill_missing_fields(skill, text, record)
+        session.update(
+            {
+                'active_skill': skill,
+                'seed_text': text,
+                'slots': record,
+                'missing': missing,
+                'pending_confirm': {} if missing else {'type': 'market_record', 'kind': kind, 'record': record, 'created_at': datetime.now().isoformat(timespec='seconds')},
+                'last_question': text,
+            }
+        )
+        return {'tool': name, 'ok': True, 'kind': kind, 'record': record, 'missing': missing, 'reply': feishu_skill_preview_record(skill, record) if not missing else feishu_skill_next_question(skill, missing)}
+
+    if name == 'update_pending_record':
+        pending = session.get('pending_confirm') if isinstance(session.get('pending_confirm'), dict) else {}
+        current = pending.get('record') if isinstance(pending.get('record'), dict) else session.get('slots', {})
+        kind = str(pending.get('kind') or current.get('kind') or ('newbuilding' if session.get('active_skill') == 'newbuilding_info' else 'cargo'))
+        if not isinstance(current, dict) or not current:
+            return {'tool': name, 'ok': False, 'error': '当前没有可修改的草稿。'}
+        record = feishu_agent_merge_record(kind, current, text)
+        skill = 'cargo_opportunity' if kind == 'cargo' else 'newbuilding_info'
+        missing = feishu_skill_missing_fields(skill, text, record)
+        session.update(
+            {
+                'active_skill': skill,
+                'seed_text': f"{session.get('seed_text')}\n{text}".strip(),
+                'slots': record,
+                'missing': missing,
+                'pending_confirm': {} if missing else {'type': 'market_record', 'kind': kind, 'record': record, 'created_at': datetime.now().isoformat(timespec='seconds')},
+                'last_question': text,
+            }
+        )
+        return {'tool': name, 'ok': True, 'kind': kind, 'record': record, 'missing': missing, 'reply': feishu_skill_preview_record(skill, record) if not missing else feishu_skill_next_question(skill, missing)}
+
+    if name == 'search_project':
+        query = compact_text(args.get('query') or args.get('q') or text)
+        items, _ = collect_project_items(q=query)
+        return {'tool': name, 'ok': True, 'query': query, 'items': items[:5], 'reply': format_project_search(items)}
+
+    if name == 'generate_market_report':
+        kind = compact_text(args.get('kind') or ('newbuilding' if '新造船' in text else 'cargo'))
+        if kind not in {'cargo', 'newbuilding'}:
+            kind = 'cargo'
+        period = compact_text(args.get('period'))
+        start_date = compact_text(args.get('start_date'))
+        end_date = compact_text(args.get('end_date'))
+        if not (period and start_date and end_date):
+            period, start_date, end_date = feishu_guess_period(text)
+        if not (period and start_date and end_date):
+            return {'tool': name, 'ok': False, 'error': '请补充报告时间范围，例如本月、上月，或 2026-06-01 到 2026-06-30。'}
+        report = build_market_report(MarketReportPayload(kind=kind, period=period, start_date=start_date, end_date=end_date, filters={}))
+        session.update({'active_skill': 'cargo_report' if kind == 'cargo' else 'newbuilding_report', 'last_result': report, 'last_question': text})
+        return {'tool': name, 'ok': True, 'kind': kind, 'report': report, 'reply': feishu_skill_preview_report('cargo_report' if kind == 'cargo' else 'newbuilding_report', report)}
+
+    if name == 'answer_bid_question':
+        if not session.get('last_result'):
+            return {'tool': name, 'ok': False, 'error': '当前没有最近一次标书解析结果，请先上传并解析标书。'}
+        answer = feishu_answer_bid_question(session['last_result'], text, config)
+        session['last_question'] = text
+        return {'tool': name, 'ok': True, 'reply': answer}
+
+    if name == 'parse_bid_file':
+        if not files:
+            return {'tool': name, 'ok': False, 'error': '请在飞书里同时上传 PDF/DOC/DOCX/XLS/XLSX 标书文件。'}
+        file_info = files[0]
+        temp_path = feishu_download_file(config, message.get('message_id', ''), file_info.get('file_key', ''), file_info.get('file_name', ''))
+        try:
+            suffix = Path(file_info.get('file_name') or temp_path.name).suffix.lower() or temp_path.suffix.lower()
+            if suffix not in {'.pdf', '.doc', '.docx', '.xls', '.xlsx'}:
+                raise HTTPException(status_code=400, detail='当前只支持 PDF、DOC、DOCX、XLS、XLSX 标书文件。')
+            document_text = extract_document_text(temp_path, suffix)
+            if len(document_text.strip()) < 80:
+                raise HTTPException(status_code=400, detail='当前版本只支持可提取文本的文件，扫描件暂不支持。')
+            result = parse_ai_document(document_text, require_config())
+            session.update({'active_skill': 'bid_parse', 'last_result': result, 'last_question': text, 'pending_confirm': {}})
+            return {'tool': name, 'ok': True, 'result': result, 'reply': feishu_skill_preview_bid(result)}
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    return {'tool': name, 'ok': False, 'error': '工具不在白名单内。'}
 
 
 def feishu_skill_preview_bid(result: dict[str, Any]) -> str:
@@ -2525,9 +2779,48 @@ def feishu_skill_execute(route: dict[str, Any], message: dict[str, Any], config:
 
 
 def handle_feishu_message(message: dict[str, Any], config: dict[str, Any]) -> str:
-    session = feishu_dialog_load(message.get('open_id', ''), message.get('chat_id', ''))
-    route = feishu_skill_route(message.get('text', ''), message.get('files') or [], session, config)
-    return feishu_skill_execute(route, message, config)
+    open_id = message.get('open_id', '')
+    chat_id = message.get('chat_id', '')
+    text = compact_text(message.get('text') or '')
+    files = message.get('files') or []
+    session = feishu_dialog_load(open_id, chat_id)
+    try:
+        decision = feishu_agent_decide(text, files, session, config)
+    except HTTPException as exc:
+        if exc.status_code == 400 and 'AI 暂不可用' in str(exc.detail):
+            return compact_text(exc.detail)
+        raise
+
+    tool_results: list[dict[str, Any]] = []
+    for call in decision.get('tool_calls') or [{'name': 'chat_general', 'arguments': {}}]:
+        result = feishu_agent_execute_tool(call, message, session, config)
+        tool_results.append(result)
+        session['last_tool_result'] = result
+
+    pending_update = decision.get('pending_update') if isinstance(decision.get('pending_update'), dict) else {}
+    if pending_update:
+        for key in ('agent_summary', 'last_question'):
+            if key in pending_update:
+                session[key] = compact_text(pending_update.get(key))
+    if text:
+        session['last_question'] = text
+    feishu_dialog_save(open_id, chat_id, session)
+
+    explicit_reply = compact_text(decision.get('reply'))
+    if explicit_reply and not any(result.get('tool') != 'chat_general' for result in tool_results):
+        return explicit_reply
+    try:
+        reply = feishu_agent_chat_reply(text, session, config, tool_results)
+        if reply:
+            return reply
+    except HTTPException:
+        pass
+    for result in tool_results:
+        if result.get('reply'):
+            return sanitize_feishu_reply(result.get('reply'))
+        if result.get('error'):
+            return f"处理时遇到问题：{compact_text(result.get('error'))}"
+    return 'AI 已处理这条消息，但没有生成可发送的回复。'
 
 
 def process_feishu_event(message: dict[str, Any], config: dict[str, Any]) -> None:
@@ -4637,19 +4930,58 @@ def _self_check() -> None:
 
 
 def handle_feishu_message(message: dict[str, Any], config: dict[str, Any]) -> str:
-    session = feishu_dialog_load(message.get('open_id', ''), message.get('chat_id', ''))
-    route = feishu_skill_route(message.get('text', ''), message.get('files') or [], session, config)
-    return feishu_skill_execute(route, message, config)
+    open_id = message.get('open_id', '')
+    chat_id = message.get('chat_id', '')
+    text = compact_text(message.get('text') or '')
+    files = message.get('files') or []
+    session = feishu_dialog_load(open_id, chat_id)
+    try:
+        decision = feishu_agent_decide(text, files, session, config)
+    except HTTPException as exc:
+        if exc.status_code == 400 and 'AI 暂不可用' in str(exc.detail):
+            return compact_text(exc.detail)
+        raise
+
+    tool_results: list[dict[str, Any]] = []
+    for call in decision.get('tool_calls') or [{'name': 'chat_general', 'arguments': {}}]:
+        result = feishu_agent_execute_tool(call, message, session, config)
+        tool_results.append(result)
+        session['last_tool_result'] = result
+
+    pending_update = decision.get('pending_update') if isinstance(decision.get('pending_update'), dict) else {}
+    if pending_update:
+        for key in ('agent_summary', 'last_question'):
+            if key in pending_update:
+                session[key] = compact_text(pending_update.get(key))
+    if text:
+        session['last_question'] = text
+    feishu_dialog_save(open_id, chat_id, session)
+
+    explicit_reply = compact_text(decision.get('reply'))
+    if explicit_reply and not any(result.get('tool') != 'chat_general' for result in tool_results):
+        return explicit_reply
+    try:
+        reply = feishu_agent_chat_reply(text, session, config, tool_results)
+        if reply:
+            return reply
+    except HTTPException:
+        pass
+    for result in tool_results:
+        if result.get('reply'):
+            return sanitize_feishu_reply(result.get('reply'))
+        if result.get('error'):
+            return f"处理时遇到问题：{compact_text(result.get('error'))}"
+    return 'AI 已处理这条消息，但没有生成可发送的回复。'
 
 
 def process_feishu_event(message: dict[str, Any], config: dict[str, Any]) -> None:
     try:
         reply = handle_feishu_message(message, config)
     except HTTPException as exc:
-        reply = f'处理时遇到问题：{compact_text(exc.detail)}\n下一步：请补充缺失信息，或者回复“取消”重新开始。'
+        reply = f'处理时遇到问题：{compact_text(exc.detail)}'
     except Exception as exc:
-        print(f'Feishu skill error: {exc}')
-        reply = '处理时遇到问题：系统暂时没法完成这次请求。\n下一步：请稍后再试，或者换一种说法。'
+        print(f'Feishu agent error: {exc}')
+        reply = '处理时遇到问题：AI 暂时没法完成这次请求，请稍后再试。'
     try:
         feishu_reply_message(config, message.get('message_id', ''), sanitize_feishu_reply(reply))
     except Exception as exc:

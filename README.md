@@ -171,6 +171,41 @@ http://127.0.0.1:8008
 - 上传过程中的临时文件：
   `data/tmp/`
 
+## Docker 部署与配置持久化
+
+Docker 部署时必须持久化 `/app/data`，否则容器重建后 AI 配置、飞书配置、历史项目都会丢失。
+
+推荐使用仓库内的 `docker-compose.yml` 启动：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+默认会创建 Docker volume `biaoshujiexi_data` 并挂载到容器 `/app/data`。网页端保存的 AI 配置和飞书配置会写入：
+
+```text
+/app/data/config.json
+```
+
+如果不用 compose，直接 `docker run` 时也要挂载数据卷：
+
+```bash
+docker run -d \
+  --name biaoshujiexi \
+  --restart unless-stopped \
+  -p 8008:8008 \
+  -v biaoshujiexi_data:/app/data \
+  ghcr.io/pwj2333/biaoshujiexi:latest
+```
+
+查看容器内配置是否已保存：
+
+```bash
+docker exec -it biaoshujiexi ls -l /app/data
+docker exec -it biaoshujiexi cat /app/data/config.json
+```
+
 ## 打包与交付注意事项
 
 如果要把项目交给别人使用，至少需要带上这些内容：

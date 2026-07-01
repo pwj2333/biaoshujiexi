@@ -1,6 +1,7 @@
 import tempfile
 import uuid
 import re
+import json
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
@@ -504,9 +505,9 @@ try:
     assert verify_resp.status_code == 200
     assert verify_resp.json()['challenge'] == 'challenge-ok'
 
-    help_reply = handle_feishu_message({'open_id': 'ou_anyone', 'chat_id': 'chat_anywhere', 'message_id': 'mid-help', 'text': '帮助', 'files': []}, load_config())
-    assert '我现在能做这些事' in help_reply
-    assert '市场情报' in help_reply
+    unavailable_reply = handle_feishu_message({'open_id': 'ou_anyone', 'chat_id': 'chat_anywhere', 'message_id': 'mid-help', 'text': '你好', 'files': []}, load_config())
+    assert 'AI 暂不可用' in unavailable_reply
+    assert '我现在能做这些事' not in unavailable_reply
     ws_event = type(
         'WsEvent',
         (),
@@ -526,21 +527,47 @@ try:
     assert ws_payload['header']['event_type'] == 'im.message.receive_v1'
     assert ws_payload['event']['message']['content'] == '{"text":"帮助"}'
 
-    message = {
-        'open_id': 'ou_smoke',
-        'chat_id': 'chat_smoke',
-        'message_id': 'mid-smoke',
-        'text': '4000吨甲苯，张家港～东莞，要求月内装出，远大的计划',
-        'files': [],
-    }
-    reply = handle_feishu_message(message, load_config())
-    assert '确认保存' in reply
-    assert '下一步' in reply
-    confirm_reply = handle_feishu_message({**message, 'text': '确认保存'}, load_config())
-    feishu_cargo_id = re.search(r'[a-f0-9]{32}', confirm_reply).group(0)
-    assert '已保存' in confirm_reply
-    assert '下一步' in confirm_reply
-    assert market_record_path('cargo', feishu_cargo_id).exists()
+    save_config({**load_config(), 'base_url': 'https://example.com/v1', 'api_key': 'sk-agent-test', 'model': 'agent-test'})
+
+    def fake_agent_chat(config, *, system_prompt, user_prompt, temperature=None):
+        payload = json.loads(user_prompt)
+        text = payload.get('user_text', '')
+        if 'required_json' in payload:
+            if '4000吨甲苯' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'extract_cargo_opportunity', 'arguments': {'text': text}}], 'needs_confirmation': True, 'pending_update': {}}, ensure_ascii=False)
+            if text in {'确认保存', '保存'}:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'save_pending_record', 'arguments': {}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+            return json.dumps({'reply': '', 'tool_calls': [{'name': 'chat_general', 'arguments': {}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+        tool_results = payload.get('tool_results') or []
+        if tool_results and tool_results[0].get('tool') == 'extract_cargo_opportunity':
+            return '我已帮你填好商机草稿，请确认保存。'
+        if tool_results and tool_results[0].get('tool') == 'save_pending_record':
+            return f"已保存，记录 ID：{tool_results[0]['record']['id']}"
+        return '这是 AI 自然回复，不是固定菜单。'
+
+    import app as app_module
+    original_module_call_chat = app_module.call_chat_completion
+    app_module.call_chat_completion = fake_agent_chat
+    try:
+        chat_reply = handle_feishu_message({'open_id': 'ou_chat', 'chat_id': 'chat_agent_chat', 'message_id': 'mid-chat', 'text': '你好，随便聊聊', 'files': []}, load_config())
+        assert chat_reply == '这是 AI 自然回复，不是固定菜单。'
+        assert '我现在能做这些事' not in chat_reply
+
+        message = {
+            'open_id': 'ou_smoke',
+            'chat_id': 'chat_smoke',
+            'message_id': 'mid-smoke',
+            'text': '4000吨甲苯，张家港～东莞，要求月内装出，远大的计划',
+            'files': [],
+        }
+        reply = handle_feishu_message(message, load_config())
+        assert '商机草稿' in reply
+        confirm_reply = handle_feishu_message({**message, 'text': '确认保存'}, load_config())
+        feishu_cargo_id = re.search(r'[a-f0-9]{32}', confirm_reply).group(0)
+        assert '已保存' in confirm_reply
+        assert market_record_path('cargo', feishu_cargo_id).exists()
+    finally:
+        app_module.call_chat_completion = original_module_call_chat
 finally:
     if feishu_cargo_id:
         cleanup_market('cargo', feishu_cargo_id)

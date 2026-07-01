@@ -1,0 +1,12 @@
+services:
+  biaoshujiexi:
+    image: ghcr.io/pwj2333/biaoshujiexi:latest
+    container_name: biaoshujiexi
+    restart: unless-stopped
+    ports:
+      - "8008:8008"
+    volumes:
+      - biaoshujiexi_data:/app/data
+
+volumes:
+  biaoshujiexi_data:
