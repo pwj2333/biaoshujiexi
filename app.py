@@ -757,6 +757,105 @@ def parse_json_text(content: str) -> dict[str, Any]:
     raise HTTPException(status_code=502, detail=detail)
 
 
+def extract_ai_response_content(data: Any) -> str:
+    def text_from_content(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            parts = [text_from_content(item) for item in value]
+            return '\n'.join(part for part in parts if part).strip()
+        if not isinstance(value, dict):
+            return ''
+
+        for key in ('text', 'output_text', 'content'):
+            nested = text_from_content(value.get(key))
+            if nested:
+                return nested
+        if isinstance(value.get('message'), dict):
+            nested = text_from_content(value['message'].get('content'))
+            if nested:
+                return nested
+        return ''
+
+    if isinstance(data, str):
+        return data.strip()
+    if not isinstance(data, dict):
+        return ''
+
+    choices = data.get('choices')
+    if isinstance(choices, list) and choices:
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get('message') or choice.get('delta')
+            if isinstance(message, dict):
+                content = text_from_content(message.get('content'))
+                if content:
+                    return content
+                function_call = message.get('function_call')
+                if isinstance(function_call, dict):
+                    content = text_from_content(function_call.get('arguments'))
+                    if content:
+                        return content
+                tool_calls = message.get('tool_calls')
+                if isinstance(tool_calls, list):
+                    for tool_call in tool_calls:
+                        if not isinstance(tool_call, dict):
+                            continue
+                        function = tool_call.get('function')
+                        if isinstance(function, dict):
+                            content = text_from_content(function.get('arguments'))
+                            if content:
+                                return content
+            content = text_from_content(choice.get('content') or choice.get('text'))
+            if content:
+                return content
+
+    output_text = text_from_content(data.get('output_text'))
+    if output_text:
+        return output_text
+
+    output = data.get('output')
+    if isinstance(output, list):
+        output_parts: list[str] = []
+        for item in output:
+            if isinstance(item, dict):
+                content = text_from_content(item.get('content') or item.get('text'))
+            else:
+                content = text_from_content(item)
+            if content:
+                output_parts.append(content)
+        if output_parts:
+            return '\n'.join(output_parts).strip()
+
+    for key in ('result', 'response', 'answer', 'text', 'content'):
+        content = text_from_content(data.get(key))
+        if content:
+            return content
+
+    message = data.get('message')
+    if isinstance(message, dict):
+        content = text_from_content(message.get('content'))
+        if content:
+            return content
+    elif isinstance(message, str) and message.strip().startswith('{'):
+        try:
+            nested = json.loads(message)
+            content = extract_ai_response_content(nested)
+            if content:
+                return content
+        except json.JSONDecodeError:
+            pass
+
+    data_node = data.get('data')
+    if isinstance(data_node, dict):
+        content = extract_ai_response_content(data_node)
+        if content:
+            return content
+
+    return ''
+
+
 def call_chat_completion(
     config: dict[str, Any],
     *,
@@ -822,12 +921,26 @@ def call_chat_completion(
         )
     try:
         data = response.json()
-        return data['choices'][0]['message']['content']
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail='AI 接口响应格式不兼容 chat/completions。',
+            detail=f'AI 接口响应不是有效 JSON：{response.text[:200]}',
         ) from exc
+    if isinstance(data, dict) and data.get('error'):
+        error = data['error']
+        if isinstance(error, dict):
+            message = error.get('message') or error.get('msg') or json.dumps(error, ensure_ascii=False)
+        else:
+            message = str(error)
+        raise HTTPException(status_code=502, detail=f'AI 接口返回错误：{message[:200]}')
+    content = extract_ai_response_content(data)
+    if content:
+        return content
+    preview = json.dumps(data, ensure_ascii=False)[:300] if isinstance(data, (dict, list)) else str(data)[:300]
+    raise HTTPException(
+        status_code=502,
+        detail=f'AI 接口响应中没有找到可解析的文本内容：{preview}',
+    )
 
 
 def clean_text(text: str) -> str:

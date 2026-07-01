@@ -436,13 +436,15 @@
                 <span>粘贴文本 / 邮件正文 / 资讯内容</span>
                 <textarea id="marketRawText" rows="5" placeholder="例如：4000吨甲苯，张家港～东莞，要求月内装出，远大的计划"></textarea>
               </label>
-              <div class="button-row">
+              <div class="button-row market-editor-actions">
                 <button id="marketExtractBtn">AI识别填表</button>
                 <button id="marketNewBtn">新建空白</button>
                 <button id="marketSaveBtn" class="primary">保存记录</button>
                 <button id="marketDeleteBtn" class="ghost danger">删除当前</button>
               </div>
-              <div id="marketForm" class="form-grid market-form"></div>
+              <div class="market-editor-scroll">
+                <div id="marketForm" class="form-grid market-form"></div>
+              </div>
             </section>
           </div>
         </section>

@@ -9,7 +9,7 @@ import httpx
 from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 
-from app import ProjectPayload, app, call_chat_completion, extract_document_text, handle_feishu_message, load_config, load_users, market_record_path, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_config, save_project, save_users, ws_message_to_payload
+from app import ProjectPayload, app, call_chat_completion, extract_ai_response_content, extract_document_text, handle_feishu_message, load_config, load_users, market_record_path, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_config, save_project, save_users, ws_message_to_payload
 
 
 def cleanup(project_id: str) -> None:
@@ -28,6 +28,11 @@ def cleanup_market(kind: str, record_id: str) -> None:
 
 sample = parse_json_text('```json {"ok": true} ```')
 assert sample['ok'] is True
+assert extract_ai_response_content({'choices': [{'message': {'content': '{"ok":true}'}}]}) == '{"ok":true}'
+assert extract_ai_response_content({'choices': [{'message': {'content': [{'type': 'text', 'text': '{"ok":true}'}]}}]}) == '{"ok":true}'
+assert extract_ai_response_content({'choices': [{'message': {'tool_calls': [{'function': {'arguments': '{"ok":true}'}}]}}]}) == '{"ok":true}'
+assert extract_ai_response_content({'output': [{'content': [{'type': 'output_text', 'text': '{"ok":true}'}]}]}) == '{"ok":true}'
+assert extract_ai_response_content({'data': {'result': '{"ok":true}'}}) == '{"ok":true}'
 
 merged = merge_register_rows(
     [

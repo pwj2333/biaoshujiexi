@@ -480,6 +480,31 @@ button.ghost {
 .market-editor-card {
   position: sticky;
   top: 24px;
+  display: flex;
+  flex-direction: column;
+  height: min(560px, calc(100vh - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+.market-editor-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+  padding-bottom: 8px;
+}
+
+.market-editor-actions {
+  flex-shrink: 0;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.market-editor-actions button {
+  min-width: 120px;
 }
 
 .market-analysis-card {
@@ -840,6 +865,22 @@ button.danger {
 
   .market-grid {
     grid-template-columns: 1fr;
+  }
+
+  .market-editor-card {
+    position: static;
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .market-editor-scroll {
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .market-editor-actions {
+    margin: 0;
   }
 
   .market-report-layout {
