@@ -3,71 +3,36 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>标书解析与登记 Demo</title>
+    <title>航运部 Agent</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <div class="app-shell">
-      <aside class="sidebar">
-        <section class="brand-card">
-          <p class="eyebrow">Tender Workspace</p>
-          <h1>标书解析与登记</h1>
-          <p class="copy">上传标书后先做 AI 解析，再把结果继续维护成项目档案，后续可查询中标结果、我司报价和竞对报价。</p>
-        </section>
-
-        <nav class="side-nav">
-          <button class="nav-link active" data-target="marketSkillPanel">市场情报</button>
-          <button class="nav-link" data-target="overviewPanel">解析总览</button>
-          <button class="nav-link" data-target="trackingPanel">项目跟踪</button>
-          <button class="nav-link" data-target="extractionPanel">摘取结果</button>
-          <button class="nav-link" data-target="registerPanel">登记预览</button>
-          <button class="nav-link" data-target="chatPanel">AI 对话</button>
-          <button class="nav-link" data-target="historyPanel">历史台账</button>
-          <button id="userNavBtn" class="nav-link hidden" data-target="userPanel">账号管理</button>
+      <header class="app-header">
+        <div class="app-title">
+          <h1>航运部 Agent</h1>
+          <span id="fileStatus" class="pill neutral">待解析</span>
+        </div>
+        <nav class="main-tabs" aria-label="主业务板块">
+          <button class="main-tab active" data-workspace="bidWorkspace">标书解析</button>
+          <button class="main-tab" data-workspace="marketWorkspace">市场情报</button>
         </nav>
+        <div class="header-actions">
+          <span id="configStatus" class="pill neutral">未保存</span>
+          <span id="feishuStatus" class="pill neutral">未启用</span>
+          <button id="settingsToggleBtn">系统设置</button>
+          <button id="logoutBtn" class="ghost compact-logout">退出登录</button>
+        </div>
+      </header>
 
-        <section class="upload-card">
-          <div class="section-head">
-            <div>
-              <p class="eyebrow">Upload</p>
-              <h2>上传标书</h2>
-            </div>
-            <span id="fileStatus" class="pill neutral">待解析</span>
-          </div>
-          <label class="field">
-            <span>项目标题</span>
-            <input id="projectTitle" placeholder="默认取标书项目名称" />
-          </label>
-          <label class="field">
-            <span>标书文件</span>
-            <input
-              id="fileInput"
-              type="file"
-              accept=".pdf,.doc,.docx,.xls,.xlsx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            />
-          </label>
-          <label class="field">
-            <span>登记展示方式</span>
-            <select id="registerMode">
-              <option value="packages">每个标段一行</option>
-              <option value="document">整份标书一行</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>登记年份</span>
-            <input id="sheetName" placeholder="例如 2026" />
-          </label>
-          <div class="button-stack">
-            <button id="parseBtn" class="primary">开始解析</button>
-            <button id="saveProjectBtn">保存当前记录</button>
-            <button id="deleteProjectBtn" class="ghost">删除当前记录</button>
-          </div>
-        </section>
-
-        <details class="config-card">
+      <aside id="settingsPanel" class="settings-panel hidden" aria-label="系统设置">
+        <div class="settings-head">
+          <h2>系统设置</h2>
+          <button id="settingsCloseBtn" class="ghost">关闭</button>
+        </div>
+        <details class="config-card" open>
           <summary>
             <span>AI 配置</span>
-            <span id="configStatus" class="pill neutral">未保存</span>
           </summary>
           <div class="config-body">
             <label class="field">
@@ -103,8 +68,7 @@
 
         <details class="config-card">
           <summary>
-            <span>飞书机器人</span>
-            <span id="feishuStatus" class="pill neutral">未启用</span>
+            <span>飞书 Agent</span>
           </summary>
           <div class="config-body">
             <label class="check-line">
@@ -114,12 +78,12 @@
             <label class="field">
               <span>接收模式</span>
               <select id="feishuReceiveMode">
-                <option value="ws">长连接（匹配当前飞书配置）</option>
+                <option value="ws">长连接</option>
                 <option value="http">HTTP 回调</option>
               </select>
             </label>
             <label class="field">
-              <span>HTTP 回调地址（仅 HTTP 模式使用）</span>
+              <span>HTTP 回调地址</span>
               <input id="feishuCallbackUrl" readonly />
             </label>
             <label class="field">
@@ -136,7 +100,15 @@
             </label>
             <label class="field">
               <span>Encrypt Key</span>
-              <input id="feishuEncryptKey" type="password" placeholder="未启用加密可留空" />
+              <input id="feishuEncryptKey" type="password" />
+            </label>
+            <label class="field">
+              <span>允许 open_id</span>
+              <textarea id="feishuAllowedOpenIds" rows="2"></textarea>
+            </label>
+            <label class="field">
+              <span>允许 chat_id</span>
+              <textarea id="feishuAllowedChatIds" rows="2"></textarea>
             </label>
             <div class="two-col">
               <label class="field">
@@ -157,323 +129,29 @@
             </div>
           </div>
         </details>
-      </aside>
 
-      <main class="workspace">
-        <section class="hero-panel">
-          <div>
-            <p class="eyebrow">Bid Intelligence Demo</p>
-            <h2>解析只是入口，真正可复用的是历史项目跟踪、报价对比和中标结果追溯。</h2>
-            <p class="copy">摘取导出会分成两页：第一页放摘取结果，第二页用同一模板放原文依据；登记导出严格按项目目录下的模板文件生成。</p>
+        <section id="userPanel" class="settings-section">
+          <div class="tracking-head">
+            <h3>账号管理</h3>
+            <button id="userNavBtn" class="hidden" data-target="userPanel">账号管理</button>
           </div>
-          <div class="hero-note">
-            <strong>当前版本</strong>
-            <span>数据仍然只保存在 `data/projects` 的 JSON 文件中，不接数据库；但已经支持项目级增删改查、历史筛选、报价维护和结果导出。</span>
-            <button id="logoutBtn" class="ghost compact-logout">退出登录</button>
-          </div>
-        </section>
-
-        <section id="overviewPanel" class="content-panel">
-          <div class="panel-head">
-            <div>
-              <h3>解析总览</h3>
-              <p>先看关键字段、AI 分析和风险提示，再决定是否导出、保存或进入项目跟踪。</p>
-            </div>
-            <div class="button-row">
-              <button id="askDefaultBtn">刷新分析建议</button>
-              <button id="exportOverviewBtn" class="primary">导出总览 Excel</button>
-            </div>
-          </div>
-          <div id="resultEmpty" class="empty-state">
-            <strong>还没有解析结果</strong>
-            <span>从左侧上传标书，或展开历史记录后打开一条已保存项目。</span>
-          </div>
-          <div id="resultSection" class="result-section hidden">
-            <div id="summaryPanel" class="summary-grid"></div>
-            <div id="analysisPanel" class="analysis-grid"></div>
-            <div id="reviewPanel" class="review-list"></div>
-          </div>
-        </section>
-
-        <section id="historyPanel" class="content-panel hidden">
-          <div class="panel-head">
-            <div>
-              <h3>历史台账</h3>
-              <p>在这里集中查询历史项目、查看汇总统计，并按当前筛选条件导出台账。</p>
-            </div>
-            <div class="button-row">
-              <span id="projectCount" class="pill neutral">0 条</span>
-              <button id="exportLedgerBtn" class="primary">导出台账</button>
-            </div>
-          </div>
-          <div class="history-layout">
-            <div class="history-query-card">
-              <label class="field">
-                <span>关键词</span>
-                <input id="projectSearch" placeholder="项目名称、招标编号、招标人、文件名" />
-              </label>
-              <div class="history-filters">
-                <label class="field">
-                  <span>登记年份</span>
-                  <input id="historyYear" placeholder="例如 2026" />
-                </label>
-                <label class="field">
-                  <span>投标状态</span>
-                  <select id="historyBidStatus">
-                    <option value="">全部</option>
-                    <option value="待跟进">待跟进</option>
-                    <option value="准备投标">准备投标</option>
-                    <option value="已投标">已投标</option>
-                    <option value="放弃">放弃</option>
-                    <option value="未投标">未投标</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span>中标状态</span>
-                  <select id="historyAwardStatus">
-                    <option value="">全部</option>
-                    <option value="未知">未知</option>
-                    <option value="待定">待定</option>
-                    <option value="已中标">已中标</option>
-                    <option value="未中标">未中标</option>
-                  </select>
-                </label>
-              </div>
-            </div>
-            <div id="historyStats" class="history-stats"></div>
-            <div id="projectList" class="project-list ledger-list"></div>
-          </div>
-        </section>
-
-        <section id="trackingPanel" class="content-panel hidden">
-          <div class="panel-head">
-            <div>
-              <h3>项目跟踪</h3>
-              <p>这里维护投标结果、我司报价、竞对报价和时间线，保存后可在历史记录里持续查询。</p>
-            </div>
-            <span class="pill neutral">JSON 归档</span>
-          </div>
-          <div class="tracking-grid">
-            <section class="tracking-card">
-              <div class="tracking-head">
-                <h4>跟踪结果</h4>
-                <span class="card-note">当前项目结论</span>
-              </div>
-              <div id="followUpForm" class="form-grid"></div>
-            </section>
-
-            <section class="tracking-card">
-              <div class="tracking-head">
-                <h4>我司报价一览</h4>
-                <div class="button-row compact-actions">
-                  <button id="exportOurQuotesBtn">导出 Excel</button>
-                  <button id="addOurQuoteBtn">新增报价</button>
-                </div>
-              </div>
-              <div id="ourQuotesTable" class="table-wrap compact-table"></div>
-            </section>
-
-            <section class="tracking-card">
-              <div class="tracking-head">
-                <h4>竞对报价一览</h4>
-                <div class="button-row compact-actions">
-                  <button id="exportCompetitorQuotesBtn">导出 Excel</button>
-                  <button id="addCompetitorQuoteBtn">新增竞对</button>
-                </div>
-              </div>
-              <div id="competitorQuotesTable" class="table-wrap compact-table"></div>
-            </section>
-
-            <section class="tracking-card">
-              <div class="tracking-head">
-                <h4>跟进时间线</h4>
-                <button id="addTimelineBtn">新增记录</button>
-              </div>
-              <div id="timelineTable" class="table-wrap compact-table"></div>
-            </section>
-          </div>
-        </section>
-
-        <section id="extractionPanel" class="content-panel hidden">
-          <div class="panel-head">
-            <div>
-              <h3>摘取结果</h3>
-              <p>导出时第一页是摘取结果，第二页是相同模板的原文依据，原文不会再用省略号代替。</p>
-            </div>
-            <button id="exportExtractionBtn" class="primary">导出摘取 Excel</button>
-          </div>
-          <div id="extractionTable" class="table-wrap"></div>
-        </section>
-
-        <section id="registerPanel" class="content-panel hidden">
-          <div class="panel-head">
-            <div>
-              <h3>登记预览</h3>
-              <p>登记导出严格按模板文件中的列顺序填写，年份使用你输入的 sheet 名称。</p>
-            </div>
-            <button id="exportRegisterBtn" class="primary">导出登记 Excel</button>
-          </div>
-          <div id="registerTable" class="table-wrap"></div>
-        </section>
-
-        <section id="chatPanel" class="content-panel hidden">
-          <div class="panel-head">
-            <div>
-              <h3>AI 对话</h3>
-              <p>仅基于当前标书和本次解析结果回答，适合追问投标截止时间、保证金、资格要求和评标标准。</p>
-            </div>
-            <span class="pill neutral">仅当前项目</span>
-          </div>
-          <div id="chatMessages" class="chat-box"></div>
-          <div class="chat-compose">
-            <textarea id="chatInput" rows="3" placeholder="例如：本项目的投标截止时间是什么？保证金如何缴纳？"></textarea>
-            <button id="sendChatBtn" class="primary">发送</button>
-          </div>
-        </section>
-
-        <section id="marketSkillPanel" class="content-panel hidden">
-          <div class="panel-head">
-            <div>
-              <h3>市场情报</h3>
-              <p>独立新增模块，不改原标书解析。商机和新造船数据单独保存到 data/market_skill，可查询、维护、导出。</p>
-            </div>
-            <div class="button-row">
-              <button id="marketExportBtn" class="primary">导出台账 Excel</button>
-            </div>
-          </div>
-
-          <div class="market-tabs">
-            <button id="marketCargoTab" class="market-tab active" data-kind="cargo">商机收集</button>
-            <button id="marketNewbuildingTab" class="market-tab" data-kind="newbuilding">新造船收集</button>
-          </div>
-
-          <details class="tracking-card market-analysis-card">
-            <summary class="tracking-head market-analysis-summary">
-              <div>
-                <h4 id="marketAnalysisTitle">商机市场分析</h4>
-                <span class="card-note">基于当前台账筛选生成，商机只统计“已成交 + 有成交价”的样本。</span>
-              </div>
-              <div class="button-row compact-actions">
-                <button id="marketGenerateReportBtn" class="primary">生成报告</button>
-                <button id="marketReportExportBtn">导出 AI 分析 Word</button>
-              </div>
-            </summary>
-            <div class="form-grid market-report-filters">
-              <label class="field">
-                <span>开始日期</span>
-                <input id="marketReportStart" type="date" />
-              </label>
-              <label class="field">
-                <span>结束日期</span>
-                <input id="marketReportEnd" type="date" />
-              </label>
-              <label class="field field-span-2">
-                <span>AI 分析提示词（可修改）</span>
-                <textarea id="marketReportPrompt" rows="4" placeholder="例如：请重点分析成交价走势、竞对价格、丢单原因，并给出下周经营建议。"></textarea>
-              </label>
-            </div>
-            <div id="marketAnalysis" class="market-analysis"></div>
-          </details>
-
-          <div class="market-grid">
-            <div class="market-left">
-              <details class="tracking-card market-filter-card">
-                <summary class="tracking-head market-filter-summary">
-                  <h4>查询与统计</h4>
-                  <span id="marketCount" class="pill neutral">0 条</span>
-                </summary>
-                <div class="form-grid">
-                  <label class="field">
-                    <span>关键字</span>
-                    <input id="marketSearch" placeholder="航线、货品、货主、船厂、船东" />
-                  </label>
-                  <label class="field market-cargo-filter">
-                    <span>货盘类型</span>
-                    <select id="marketBoardType">
-                      <option value="">全部</option>
-                      <option value="长期货盘">长期货盘</option>
-                      <option value="即时货盘">即时货盘</option>
-                    </select>
-                  </label>
-                  <label class="field market-cargo-filter">
-                    <span>业务板块</span>
-                    <select id="marketSegment">
-                      <option value="">全部</option>
-                      <option value="内贸化">内贸化</option>
-                      <option value="内贸油">内贸油</option>
-                      <option value="外贸">外贸</option>
-                    </select>
-                  </label>
-                  <label class="field market-cargo-filter">
-                    <span>成交状态</span>
-                    <select id="marketStatus">
-                      <option value="">全部</option>
-                      <option value="跟进中">跟进中</option>
-                      <option value="已成交">已成交</option>
-                      <option value="未成交">未成交</option>
-                      <option value="放弃">放弃</option>
-                    </select>
-                  </label>
-                </div>
-                <div id="marketStats" class="history-stats"></div>
-              </details>
-
-              <section class="tracking-card market-ledger-card">
-                <div class="tracking-head">
-                  <h4 id="marketLedgerTitle">商机台账</h4>
-                  <span class="card-note">点击记录可回填右侧表单继续编辑</span>
-                </div>
-                <div id="marketList" class="project-list ledger-list"></div>
-              </section>
-            </div>
-
-            <section class="tracking-card market-editor-card">
-              <div class="tracking-head">
-                <h4 id="marketFormTitle">商机录入</h4>
-                <span id="marketSaveStatus" class="pill neutral">独立归档</span>
-              </div>
-              <label class="field">
-                <span>粘贴文本 / 邮件正文 / 资讯内容</span>
-                <textarea id="marketRawText" rows="5" placeholder="例如：4000吨甲苯，张家港～东莞，要求月内装出，远大的计划"></textarea>
-              </label>
-              <div class="button-row market-editor-actions">
-                <button id="marketExtractBtn">AI识别填表</button>
-                <button id="marketNewBtn">新建空白</button>
-                <button id="marketSaveBtn" class="primary">保存记录</button>
-                <button id="marketDeleteBtn" class="ghost danger">删除当前</button>
-              </div>
-              <div class="market-editor-scroll">
-                <div id="marketForm" class="form-grid market-form"></div>
-              </div>
-            </section>
-          </div>
-        </section>
-
-        <section id="userPanel" class="content-panel hidden">
-          <div class="panel-head">
-            <div>
-              <h3>账号管理</h3>
-              <p>仅管理员可创建账号。普通账号可登录使用系统，但不能创建其他账号。</p>
-            </div>
-          </div>
-          <div class="tracking-grid">
+          <div class="settings-account-grid">
             <section class="tracking-card">
               <div class="tracking-head">
                 <h4>新建账号</h4>
-                <span class="card-note">管理员专用</span>
               </div>
               <div class="form-grid">
                 <label class="field">
                   <span>用户名</span>
-                  <input id="newUsername" placeholder="请输入用户名" />
+                  <input id="newUsername" />
                 </label>
                 <label class="field">
                   <span>显示名称</span>
-                  <input id="newDisplayName" placeholder="例如：航运部-张三" />
+                  <input id="newDisplayName" />
                 </label>
                 <label class="field">
                   <span>密码</span>
-                  <input id="newPassword" type="password" placeholder="请输入密码" />
+                  <input id="newPassword" type="password" />
                 </label>
                 <label class="field">
                   <span>角色</span>
@@ -487,7 +165,6 @@
                 <button id="createUserBtn" class="primary">创建账号</button>
               </div>
             </section>
-
             <section class="tracking-card">
               <div class="tracking-head">
                 <h4>账号列表</h4>
@@ -497,9 +174,294 @@
             </section>
           </div>
         </section>
+      </aside>
+
+      <main class="workspace">
+        <section id="bidWorkspace" class="business-workspace active">
+          <div class="workbar">
+            <label class="field">
+              <span>项目标题</span>
+              <input id="projectTitle" placeholder="默认取标书项目名称" />
+            </label>
+            <label class="field">
+              <span>标书文件</span>
+              <input
+                id="fileInput"
+                type="file"
+                accept=".pdf,.doc,.docx,.xls,.xlsx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              />
+            </label>
+            <label class="field">
+              <span>登记方式</span>
+              <select id="registerMode">
+                <option value="packages">每个标段一行</option>
+                <option value="document">整份标书一行</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>登记年份</span>
+              <input id="sheetName" placeholder="2026" />
+            </label>
+            <div class="workbar-actions">
+              <button id="parseBtn" class="primary">开始解析</button>
+              <button id="saveProjectBtn">保存记录</button>
+              <button id="deleteProjectBtn" class="ghost danger">删除</button>
+            </div>
+          </div>
+
+          <nav class="sub-tabs" aria-label="标书解析功能">
+            <button class="nav-link active" data-target="overviewPanel">总览</button>
+            <button class="nav-link" data-target="extractionPanel">摘取</button>
+            <button class="nav-link" data-target="registerPanel">登记</button>
+            <button class="nav-link" data-target="trackingPanel">跟踪</button>
+            <button class="nav-link" data-target="chatPanel">对话</button>
+            <button class="nav-link" data-target="historyPanel">历史</button>
+          </nav>
+
+          <section id="overviewPanel" class="content-panel">
+            <div class="panel-head">
+              <h3>总览</h3>
+              <div class="button-row">
+                <button id="askDefaultBtn">刷新分析</button>
+                <button id="exportOverviewBtn" class="primary">导出总览</button>
+              </div>
+            </div>
+            <div id="resultEmpty" class="empty-state">
+              <strong>暂无解析结果</strong>
+            </div>
+            <div id="resultSection" class="result-section hidden">
+              <div id="summaryPanel" class="summary-grid"></div>
+              <div id="analysisPanel" class="analysis-grid"></div>
+              <div id="reviewPanel" class="review-list"></div>
+            </div>
+          </section>
+
+          <section id="extractionPanel" class="content-panel hidden">
+            <div class="panel-head">
+              <h3>摘取</h3>
+              <button id="exportExtractionBtn" class="primary">导出摘取</button>
+            </div>
+            <div id="extractionTable" class="table-wrap"></div>
+          </section>
+
+          <section id="registerPanel" class="content-panel hidden">
+            <div class="panel-head">
+              <h3>登记</h3>
+              <button id="exportRegisterBtn" class="primary">导出登记</button>
+            </div>
+            <div id="registerTable" class="table-wrap"></div>
+          </section>
+
+          <section id="trackingPanel" class="content-panel hidden">
+            <div class="panel-head">
+              <h3>跟踪</h3>
+              <span class="pill neutral">项目档案</span>
+            </div>
+            <div class="tracking-grid">
+              <section class="tracking-card">
+                <div class="tracking-head">
+                  <h4>跟踪结果</h4>
+                </div>
+                <div id="followUpForm" class="form-grid"></div>
+              </section>
+              <section class="tracking-card">
+                <div class="tracking-head">
+                  <h4>我司报价</h4>
+                  <div class="button-row compact-actions">
+                    <button id="exportOurQuotesBtn">导出</button>
+                    <button id="addOurQuoteBtn">新增</button>
+                  </div>
+                </div>
+                <div id="ourQuotesTable" class="table-wrap compact-table"></div>
+              </section>
+              <section class="tracking-card">
+                <div class="tracking-head">
+                  <h4>竞对报价</h4>
+                  <div class="button-row compact-actions">
+                    <button id="exportCompetitorQuotesBtn">导出</button>
+                    <button id="addCompetitorQuoteBtn">新增</button>
+                  </div>
+                </div>
+                <div id="competitorQuotesTable" class="table-wrap compact-table"></div>
+              </section>
+              <section class="tracking-card">
+                <div class="tracking-head">
+                  <h4>时间线</h4>
+                  <button id="addTimelineBtn">新增</button>
+                </div>
+                <div id="timelineTable" class="table-wrap compact-table"></div>
+              </section>
+            </div>
+          </section>
+
+          <section id="chatPanel" class="content-panel hidden">
+            <div class="panel-head">
+              <h3>对话</h3>
+              <span class="pill neutral">当前项目</span>
+            </div>
+            <div id="chatMessages" class="chat-box"></div>
+            <div class="chat-compose">
+              <textarea id="chatInput" rows="3" placeholder="输入问题"></textarea>
+              <button id="sendChatBtn" class="primary">发送</button>
+            </div>
+          </section>
+
+          <section id="historyPanel" class="content-panel hidden">
+            <div class="panel-head">
+              <h3>历史</h3>
+              <div class="button-row">
+                <span id="projectCount" class="pill neutral">0 条</span>
+                <button id="exportLedgerBtn" class="primary">导出台账</button>
+              </div>
+            </div>
+            <div class="history-layout">
+              <div class="history-query-card">
+                <label class="field">
+                  <span>关键词</span>
+                  <input id="projectSearch" placeholder="项目名称、招标编号、招标人、文件名" />
+                </label>
+                <div class="history-filters">
+                  <label class="field">
+                    <span>登记年份</span>
+                    <input id="historyYear" placeholder="2026" />
+                  </label>
+                  <label class="field">
+                    <span>投标状态</span>
+                    <select id="historyBidStatus">
+                      <option value="">全部</option>
+                      <option value="待跟进">待跟进</option>
+                      <option value="准备投标">准备投标</option>
+                      <option value="已投标">已投标</option>
+                      <option value="放弃">放弃</option>
+                      <option value="未投标">未投标</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>中标状态</span>
+                    <select id="historyAwardStatus">
+                      <option value="">全部</option>
+                      <option value="未知">未知</option>
+                      <option value="待定">待定</option>
+                      <option value="已中标">已中标</option>
+                      <option value="未中标">未中标</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div id="historyStats" class="history-stats"></div>
+              <div id="projectList" class="project-list ledger-list"></div>
+            </div>
+          </section>
+        </section>
+
+        <section id="marketWorkspace" class="business-workspace">
+          <section id="marketSkillPanel" class="content-panel">
+            <div class="panel-head">
+              <h3>市场情报</h3>
+              <button id="marketExportBtn" class="primary">导出台账</button>
+            </div>
+            <div class="market-tabs">
+              <button id="marketCargoTab" class="market-tab active" data-kind="cargo">商机收集</button>
+              <button id="marketNewbuildingTab" class="market-tab" data-kind="newbuilding">新造船收集</button>
+            </div>
+            <details class="tracking-card market-analysis-card">
+              <summary class="tracking-head market-analysis-summary">
+                <h4 id="marketAnalysisTitle">商机市场分析</h4>
+                <div class="button-row compact-actions">
+                  <button id="marketGenerateReportBtn" class="primary">生成报告</button>
+                  <button id="marketReportExportBtn">导出 Word</button>
+                </div>
+              </summary>
+              <div class="form-grid market-report-filters">
+                <label class="field">
+                  <span>开始日期</span>
+                  <input id="marketReportStart" type="date" />
+                </label>
+                <label class="field">
+                  <span>结束日期</span>
+                  <input id="marketReportEnd" type="date" />
+                </label>
+                <label class="field field-span-2">
+                  <span>分析提示词</span>
+                  <textarea id="marketReportPrompt" rows="4"></textarea>
+                </label>
+              </div>
+              <div id="marketAnalysis" class="market-analysis"></div>
+            </details>
+            <div class="market-grid">
+              <div class="market-left">
+                <details class="tracking-card market-filter-card">
+                  <summary class="tracking-head market-filter-summary">
+                    <h4>查询与统计</h4>
+                    <span id="marketCount" class="pill neutral">0 条</span>
+                  </summary>
+                  <div class="form-grid">
+                    <label class="field">
+                      <span>关键字</span>
+                      <input id="marketSearch" placeholder="航线、货品、货主、船厂、船东" />
+                    </label>
+                    <label class="field market-cargo-filter">
+                      <span>货盘类型</span>
+                      <select id="marketBoardType">
+                        <option value="">全部</option>
+                        <option value="长期货盘">长期货盘</option>
+                        <option value="即时货盘">即时货盘</option>
+                      </select>
+                    </label>
+                    <label class="field market-cargo-filter">
+                      <span>业务板块</span>
+                      <select id="marketSegment">
+                        <option value="">全部</option>
+                        <option value="内贸化">内贸化</option>
+                        <option value="内贸油">内贸油</option>
+                        <option value="外贸">外贸</option>
+                      </select>
+                    </label>
+                    <label class="field market-cargo-filter">
+                      <span>成交状态</span>
+                      <select id="marketStatus">
+                        <option value="">全部</option>
+                        <option value="跟进中">跟进中</option>
+                        <option value="已成交">已成交</option>
+                        <option value="未成交">未成交</option>
+                        <option value="放弃">放弃</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div id="marketStats" class="history-stats"></div>
+                </details>
+                <section class="tracking-card market-ledger-card">
+                  <div class="tracking-head">
+                    <h4 id="marketLedgerTitle">商机台账</h4>
+                  </div>
+                  <div id="marketList" class="project-list ledger-list"></div>
+                </section>
+              </div>
+              <section class="tracking-card market-editor-card">
+                <div class="tracking-head">
+                  <h4 id="marketFormTitle">商机录入</h4>
+                  <span id="marketSaveStatus" class="pill neutral">新记录</span>
+                </div>
+                <label class="field">
+                  <span>粘贴文本 / 邮件正文 / 资讯内容</span>
+                  <textarea id="marketRawText" rows="5"></textarea>
+                </label>
+                <div class="market-editor-scroll">
+                  <div id="marketForm" class="form-grid market-form"></div>
+                  <div id="marketSourceSummary" class="market-source-summary hidden"></div>
+                </div>
+                <div class="button-row market-editor-actions">
+                  <button id="marketExtractBtn">AI识别填表</button>
+                  <button id="marketNewBtn">新建空白</button>
+                  <button id="marketSaveBtn" class="primary">保存记录</button>
+                  <button id="marketDeleteBtn" class="ghost danger">删除当前</button>
+                </div>
+              </section>
+            </div>
+          </section>
+        </section>
       </main>
     </div>
-
     <div id="toast" class="toast hidden"></div>
     <script src="/static/app.js"></script>
   </body>

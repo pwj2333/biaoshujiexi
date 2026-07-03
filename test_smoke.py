@@ -10,7 +10,7 @@ import httpx
 from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 
-from app import ProjectPayload, app, call_chat_completion, extract_ai_response_content, extract_document_text, handle_feishu_message, load_config, load_users, market_record_path, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_config, save_project, save_users, ws_message_to_payload
+from app import FEISHU_AGENT_LOGS_DIR, ProjectPayload, app, call_chat_completion, extract_ai_response_content, extract_document_text, handle_feishu_message, load_config, load_users, market_record_path, merge_register_rows, parse_json_text, project_path, resolve_source_excerpt, save_config, save_project, save_users, ws_message_to_payload
 
 
 def cleanup(project_id: str) -> None:
@@ -476,6 +476,11 @@ assert 'DOCX 文件格式无效' in bad_docx_resp.json()['detail']
 
 original_config = load_config()
 feishu_cargo_id = ''
+feishu_newbuilding_id = ''
+feishu_query_cargo_id = ''
+feishu_query_newbuilding_id = ''
+feishu_project_id = ''
+feishu_query_project_id = ''
 try:
     config_resp = client.post(
         '/api/config',
@@ -535,14 +540,72 @@ try:
         if 'required_json' in payload:
             if '4000吨甲苯' in text:
                 return json.dumps({'reply': '', 'tool_calls': [{'name': 'extract_cargo_opportunity', 'arguments': {'text': text}}], 'needs_confirmation': True, 'pending_update': {}}, ensure_ascii=False)
+            if '3000 吨甲苯' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'chat_general', 'arguments': {}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+            if '5000吨甲醇' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'extract_cargo_opportunity', 'arguments': {'text': text}}], 'needs_confirmation': True, 'pending_update': {}}, ensure_ascii=False)
+            if '6000吨乙二醇' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'extract_cargo_opportunity', 'arguments': {'text': text}}], 'needs_confirmation': True, 'pending_update': {}}, ensure_ascii=False)
+            if '烟测新船88' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'extract_newbuilding_info', 'arguments': {'text': text}}], 'needs_confirmation': True, 'pending_update': {}}, ensure_ascii=False)
+            if '只有烟测船厂' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'extract_newbuilding_info', 'arguments': {'text': text}}], 'needs_confirmation': True, 'pending_update': {}}, ensure_ascii=False)
+            if '装港改成' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'update_pending_record', 'arguments': {'text': text}}], 'needs_confirmation': True, 'pending_update': {}}, ensure_ascii=False)
             if text in {'确认保存', '保存'}:
                 return json.dumps({'reply': '', 'tool_calls': [{'name': 'save_pending_record', 'arguments': {}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+            if '保存了吗' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'check_last_saved_record', 'arguments': {}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+            if text == '保存项目':
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'save_bid_project', 'arguments': {}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+            if '解析标书' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'parse_bid_file', 'arguments': {}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+            if '截止时间是什么' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'answer_bid_question', 'arguments': {'question': text}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+            if '最近张家港到东莞甲苯货盘' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'search_market_records', 'arguments': {'kind': 'cargo', 'query': '甲苯'}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+            if '跟进中的甲苯货盘' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'search_market_records', 'arguments': {'kind': 'cargo', 'query': '甲苯', 'status': '跟进中'}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+            if '烟测船厂新造船' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'search_market_records', 'arguments': {'kind': 'newbuilding', 'query': '烟测船厂'}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+            if '完全不存在的烟测货盘' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'search_market_records', 'arguments': {'kind': 'cargo', 'query': '完全不存在的烟测货盘'}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+            if '福海创以前有没有项目' in text:
+                return json.dumps({'reply': '', 'tool_calls': [{'name': 'search_project', 'arguments': {'query': '福海创'}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
             return json.dumps({'reply': '', 'tool_calls': [{'name': 'chat_general', 'arguments': {}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
         tool_results = payload.get('tool_results') or []
         if tool_results and tool_results[0].get('tool') == 'extract_cargo_opportunity':
-            return '我已帮你填好商机草稿，请确认保存。'
+            if tool_results[0].get('missing'):
+                return tool_results[0].get('reply') or '请补充缺失字段。'
+            record = tool_results[0].get('record') or {}
+            return f"我已帮你填好商机草稿，装港：{record.get('load_port') or '-'}，卸港：{record.get('discharge_port') or '-'}，请确认保存。"
+        if tool_results and tool_results[0].get('tool') == 'extract_newbuilding_info':
+            if tool_results[0].get('missing'):
+                return tool_results[0].get('reply') or '请补充缺失字段。'
+            record = tool_results[0].get('record') or {}
+            return f"我已帮你填好新造船草稿，船名：{record.get('ship_name') or '-'}，船厂：{record.get('shipyard') or '-'}，请确认保存。"
+        if tool_results and tool_results[0].get('tool') == 'update_pending_record':
+            return f"已更新草稿，装港：{tool_results[0]['record'].get('load_port')}"
         if tool_results and tool_results[0].get('tool') == 'save_pending_record':
+            if not tool_results[0].get('ok'):
+                return tool_results[0].get('error') or '保存失败'
             return f"已保存，记录 ID：{tool_results[0]['record']['id']}"
+        if tool_results and tool_results[0].get('tool') == 'check_last_saved_record':
+            return tool_results[0].get('reply') or '未找到保存状态'
+        if tool_results and tool_results[0].get('tool') == 'save_bid_project':
+            if not tool_results[0].get('ok'):
+                return tool_results[0].get('error') or '项目保存失败'
+            return f"项目已保存，项目 ID：{tool_results[0]['saved_project_id']}"
+        if tool_results and tool_results[0].get('tool') == 'answer_bid_question':
+            return tool_results[0].get('reply') or '未找到标书答案'
+        if tool_results and tool_results[0].get('tool') == 'parse_bid_file':
+            if not tool_results[0].get('ok'):
+                return tool_results[0].get('error') or '标书解析失败'
+            return tool_results[0].get('reply') or '标书解析完成'
+        if tool_results and tool_results[0].get('tool') == 'search_market_records':
+            return tool_results[0].get('reply') or '未查到市场情报'
+        if tool_results and tool_results[0].get('tool') == 'search_project':
+            return tool_results[0].get('reply') or '未查到历史项目'
         return '这是 AI 自然回复，不是固定菜单。'
 
     import app as app_module
@@ -552,6 +615,10 @@ try:
         chat_reply = handle_feishu_message({'open_id': 'ou_chat', 'chat_id': 'chat_agent_chat', 'message_id': 'mid-chat', 'text': '你好，随便聊聊', 'files': []}, load_config())
         assert chat_reply == '这是 AI 自然回复，不是固定菜单。'
         assert '我现在能做这些事' not in chat_reply
+        save_config({**load_config(), 'feishu_allowed_open_ids': 'ou_allowed', 'feishu_allowed_chat_ids': ''})
+        unauthorized_reply = handle_feishu_message({'open_id': 'ou_blocked', 'chat_id': 'chat_blocked', 'message_id': 'mid-blocked', 'text': '你好', 'files': []}, load_config())
+        assert '没有权限' in unauthorized_reply
+        save_config({**load_config(), 'feishu_allowed_open_ids': '', 'feishu_allowed_chat_ids': ''})
 
         message = {
             'open_id': 'ou_smoke',
@@ -562,15 +629,269 @@ try:
         }
         reply = handle_feishu_message(message, load_config())
         assert '商机草稿' in reply
+        fallback_reply = handle_feishu_message({**message, 'open_id': 'ou_fallback', 'chat_id': 'chat_fallback', 'text': '3000 吨甲苯，张家港到东莞，月底装'}, load_config())
+        assert '商机草稿' in fallback_reply
+        assert '张家港' in fallback_reply
+        assert '东莞' in fallback_reply
+        clarify_reply = handle_feishu_message({**message, 'open_id': 'ou_clarify', 'chat_id': 'chat_clarify', 'text': '5000吨甲醇，宁波装，月底装'}, load_config())
+        assert '请补充' in clarify_reply
+        assert '卸港' in clarify_reply
+        phrase_reply = handle_feishu_message({**message, 'open_id': 'ou_phrase', 'chat_id': 'chat_phrase', 'text': '6000吨乙二醇，宁波装，东莞卸，月底装，货主远大'}, load_config())
+        assert '商机草稿' in phrase_reply
+        assert '宁波' in phrase_reply
+        assert '东莞' in phrase_reply
+        update_reply = handle_feishu_message({**message, 'text': '装港改成宁波'}, load_config())
+        assert '宁波' in update_reply
         confirm_reply = handle_feishu_message({**message, 'text': '确认保存'}, load_config())
         feishu_cargo_id = re.search(r'[a-f0-9]{32}', confirm_reply).group(0)
         assert '已保存' in confirm_reply
-        assert market_record_path('cargo', feishu_cargo_id).exists()
+        saved_record_path = market_record_path('cargo', feishu_cargo_id)
+        assert saved_record_path.exists()
+        saved_record = json.loads(saved_record_path.read_text(encoding='utf-8'))
+        assert saved_record['source'] == '飞书'
+        assert saved_record['load_port'] == '宁波'
+        assert saved_record['source_channel'] == 'feishu'
+        assert saved_record['source_message_id'] == 'mid-smoke'
+        assert saved_record['confirmed_at']
+        list_saved_resp = client.get('/api/market-skill/cargo', params={'q': '甲苯'}, headers=auth_headers)
+        assert list_saved_resp.status_code == 200
+        listed_saved = next(item for item in list_saved_resp.json()['items'] if item['id'] == feishu_cargo_id)
+        assert listed_saved['source'] == '飞书'
+        assert listed_saved['source_channel'] == 'feishu'
+        assert '4000吨甲苯' in listed_saved['source_text']
+        status_reply = handle_feishu_message({**message, 'text': '刚才那条保存了吗'}, load_config())
+        assert feishu_cargo_id in status_reply
+        assert '已经保存' in status_reply
+
+        newbuilding_message = {
+            'open_id': 'ou_newbuilding_save',
+            'chat_id': 'chat_newbuilding_save',
+            'message_id': 'mid-newbuilding-save',
+            'text': '烟测新船88，烟测船厂为烟测船东建造12000DWT化学品船，预计2027年交付',
+            'files': [],
+        }
+        newbuilding_reply = handle_feishu_message(newbuilding_message, load_config())
+        assert '新造船草稿' in newbuilding_reply
+        assert '烟测新船88' in newbuilding_reply
+        newbuilding_clarify_reply = handle_feishu_message({**newbuilding_message, 'open_id': 'ou_newbuilding_clarify', 'chat_id': 'chat_newbuilding_clarify', 'text': '只有烟测船厂有新造船消息'}, load_config())
+        assert '请补充' in newbuilding_clarify_reply
+        assert '船名' in newbuilding_clarify_reply
+        newbuilding_confirm_reply = handle_feishu_message({**newbuilding_message, 'text': '确认保存'}, load_config())
+        feishu_newbuilding_id = re.search(r'[a-f0-9]{32}', newbuilding_confirm_reply).group(0)
+        saved_newbuilding_path = market_record_path('newbuilding', feishu_newbuilding_id)
+        assert saved_newbuilding_path.exists()
+        saved_newbuilding = json.loads(saved_newbuilding_path.read_text(encoding='utf-8'))
+        assert saved_newbuilding['ship_name'] == '烟测新船88'
+        assert saved_newbuilding['source'] == '飞书'
+        assert saved_newbuilding['source_channel'] == 'feishu'
+        assert saved_newbuilding['source_message_id'] == 'mid-newbuilding-save'
+        list_newbuilding_resp = client.get('/api/market-skill/newbuilding', params={'q': '烟测新船88'}, headers=auth_headers)
+        assert list_newbuilding_resp.status_code == 200
+        listed_newbuilding = next(item for item in list_newbuilding_resp.json()['items'] if item['id'] == feishu_newbuilding_id)
+        assert listed_newbuilding['source_channel'] == 'feishu'
+        assert '烟测新船88' in listed_newbuilding['source_text']
+
+        original_download_file = app_module.feishu_download_file
+        original_parse_ai_document = app_module.parse_ai_document
+
+        def fake_download_file(config, message_id, file_key, file_name=''):
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as temp_file:
+                temp_path = Path(temp_file.name)
+            document_text = '飞书文件解析项目 招标编号 FS-PARSE-001 投标截止时间 2026-09-01 09:30 保证金 10000 元。' * 6
+            xml = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                '<w:body><w:p><w:r><w:t>'
+                + document_text
+                + '</w:t></w:r></w:p></w:body></w:document>'
+            )
+            with ZipFile(temp_path, 'w') as archive:
+                archive.writestr('word/document.xml', xml)
+            return temp_path
+
+        def fake_parse_ai_document(document_text, config):
+            assert '飞书文件解析项目' in document_text
+            return {
+                'document_summary': {
+                    'project_name': '飞书文件解析项目',
+                    'bid_no': 'FS-PARSE-001',
+                    'tenderer': '飞书招标人',
+                    'bid_deadline': '2026-09-01 09:30',
+                    'deposit_amount': '10000 元',
+                    'qualification_requirements': '具备烟测资格',
+                },
+                'extraction_fields': {},
+                'register_rows': [],
+                'analysis': {'summary': '飞书文件解析摘要'},
+                'match_review': [{'item': '资格', 'status': '注意', 'reason': '烟测风险', 'action': '复核'}],
+            }
+
+        app_module.feishu_download_file = fake_download_file
+        app_module.parse_ai_document = fake_parse_ai_document
+        try:
+            bid_parse_reply = handle_feishu_message(
+                {
+                    'open_id': 'ou_bid_parse',
+                    'chat_id': 'chat_bid_parse',
+                    'message_id': 'mid-bid-parse',
+                    'text': '解析标书',
+                    'files': [{'file_key': 'file-smoke', 'file_name': 'feishu-smoke.docx'}],
+                },
+                load_config(),
+            )
+            assert '标书解析完成' in bid_parse_reply
+            assert '飞书文件解析项目' in bid_parse_reply
+            parsed_session = app_module.feishu_dialog_load('ou_bid_parse', 'chat_bid_parse')
+            assert parsed_session['active_skill'] == 'bid_parse'
+            assert parsed_session['last_result']['document_summary']['project_name'] == '飞书文件解析项目'
+            assert parsed_session['last_file_name'] == 'feishu-smoke.docx'
+            bad_parse_reply = handle_feishu_message(
+                {
+                    'open_id': 'ou_bid_bad_parse',
+                    'chat_id': 'chat_bid_bad_parse',
+                    'message_id': 'mid-bid-bad-parse',
+                    'text': '解析标书',
+                    'files': [{'file_key': 'file-bad', 'file_name': 'bad.exe'}],
+                },
+                load_config(),
+            )
+            assert '当前只支持' in bad_parse_reply
+        finally:
+            app_module.feishu_download_file = original_download_file
+            app_module.parse_ai_document = original_parse_ai_document
+        recent_logs = sorted(FEISHU_AGENT_LOGS_DIR.glob('*/*.json'), key=lambda path: path.stat().st_mtime, reverse=True)[:10]
+        assert recent_logs
+        log_text = '\n'.join(path.read_text(encoding='utf-8') for path in recent_logs)
+        assert 'mid-smoke' in log_text
+        assert 'sk-agent-test' not in log_text
+        logs_resp = client.get('/api/feishu/agent-logs?limit=10', headers=auth_headers)
+        assert logs_resp.status_code == 200
+        assert logs_resp.json()['count'] > 0
+        assert 'sk-agent-test' not in json.dumps(logs_resp.json(), ensure_ascii=False)
+        logs_export_resp = client.get('/api/export/feishu-agent-logs?limit=10', headers=auth_headers)
+        assert logs_export_resp.status_code == 200
+        assert b'mid-smoke' in logs_export_resp.content
+
+        import app as app_module_for_bid
+        bid_session = app_module_for_bid.feishu_dialog_load('ou_bid_save', 'chat_bid_save')
+        bid_session.update(
+            {
+                'active_skill': 'bid_parse',
+                'last_result': {
+                    'document_summary': {
+                        'project_name': '飞书保存烟测项目',
+                        'bid_no': 'FS-SMOKE-001',
+                        'tenderer': '烟测招标人',
+                        'bid_deadline': '2026-08-01 10:00',
+                    },
+                    'extraction_fields': {},
+                    'register_rows': [],
+                    'analysis': {'summary': '烟测解析摘要'},
+                    'match_review': [],
+                },
+                'last_file_name': 'feishu-smoke.pdf',
+                'last_parse_text': '解析标书',
+                'last_question': '解析标书',
+            }
+        )
+        app_module_for_bid.feishu_dialog_save('ou_bid_save', 'chat_bid_save', bid_session)
+        bid_question_reply = handle_feishu_message({'open_id': 'ou_bid_save', 'chat_id': 'chat_bid_save', 'message_id': 'mid-bid-question', 'text': '截止时间是什么', 'files': []}, load_config())
+        assert '2026-08-01 10:00' in bid_question_reply
+        bid_save_reply = handle_feishu_message({'open_id': 'ou_bid_save', 'chat_id': 'chat_bid_save', 'message_id': 'mid-bid-save', 'text': '保存项目', 'files': []}, load_config())
+        feishu_project_id = re.search(r'[a-f0-9]{32}', bid_save_reply).group(0)
+        assert '项目已保存' in bid_save_reply
+        assert project_path(feishu_project_id).exists()
+        saved_project_resp = client.get(f'/api/projects/{feishu_project_id}', headers=auth_headers)
+        assert saved_project_resp.status_code == 200
+        saved_project = saved_project_resp.json()
+        assert saved_project['result']['document_summary']['project_name'] == '飞书保存烟测项目'
+        assert saved_project['follow_up']['information_source'] == '飞书'
+        assert saved_project['source_channel'] == 'feishu'
+        assert saved_project['source_open_id'] == 'ou_bid_save'
+        assert saved_project['source_chat_id'] == 'chat_bid_save'
+        assert saved_project['source_message_id'] == 'mid-bid-save'
+        assert saved_project['source_text'] == '解析标书'
+        assert saved_project['confirmed_at']
+
+        query_record_resp = client.post(
+            '/api/market-skill/cargo',
+            json={
+                'kind': 'cargo',
+                'record': {
+                    'board_type': '即时货盘',
+                    'segment': '内贸化',
+                    'cargo_name': '甲苯',
+                    'tonnage': '3000吨',
+                    'load_port': '张家港',
+                    'discharge_port': '东莞',
+                    'cargo_owner': '烟测货主',
+                    'status': '跟进中',
+                },
+            },
+            headers=auth_headers,
+        )
+        assert query_record_resp.status_code == 200
+        feishu_query_cargo_id = query_record_resp.json()['record']['id']
+        market_query_reply = handle_feishu_message({'open_id': 'ou_market_query', 'chat_id': 'chat_market_query', 'message_id': 'mid-market-query', 'text': '最近张家港到东莞甲苯货盘有哪些', 'files': []}, load_config())
+        assert feishu_query_cargo_id in market_query_reply
+        assert '甲苯' in market_query_reply
+        market_status_query_reply = handle_feishu_message({'open_id': 'ou_market_status_query', 'chat_id': 'chat_market_status_query', 'message_id': 'mid-market-status-query', 'text': '跟进中的甲苯货盘有哪些', 'files': []}, load_config())
+        assert feishu_query_cargo_id in market_status_query_reply
+        assert '跟进中' in market_status_query_reply
+
+        newbuilding_query_resp = client.post(
+            '/api/market-skill/newbuilding',
+            json={
+                'kind': 'newbuilding',
+                'record': {
+                    'stage': '预计2027年完造出厂',
+                    'ship_name': '烟测新船01',
+                    'shipyard': '烟测船厂',
+                    'owner': '烟测船东',
+                    'dwt': '12000DWT',
+                    'ship_type': '化学品船',
+                },
+            },
+            headers=auth_headers,
+        )
+        assert newbuilding_query_resp.status_code == 200
+        feishu_query_newbuilding_id = newbuilding_query_resp.json()['record']['id']
+        newbuilding_query_reply = handle_feishu_message({'open_id': 'ou_newbuilding_query', 'chat_id': 'chat_newbuilding_query', 'message_id': 'mid-newbuilding-query', 'text': '烟测船厂新造船有哪些', 'files': []}, load_config())
+        assert feishu_query_newbuilding_id in newbuilding_query_reply
+        assert '烟测船厂' in newbuilding_query_reply
+
+        no_result_reply = handle_feishu_message({'open_id': 'ou_market_empty', 'chat_id': 'chat_market_empty', 'message_id': 'mid-market-empty', 'text': '完全不存在的烟测货盘有哪些', 'files': []}, load_config())
+        assert '没有查到' in no_result_reply
+        assert '换个' in no_result_reply
+
+        feishu_query_project_id = uuid.uuid4().hex
+        save_project(
+            feishu_query_project_id,
+            ProjectPayload(
+                title='福海创烟测历史项目',
+                source_file_name='fuhai-smoke.pdf',
+                result={'document_summary': {'project_name': '福海创烟测历史项目', 'bid_no': 'FHC-SMOKE-001', 'tenderer': '福海创'}},
+                follow_up={'bid_status': '已投标', 'award_status': '未知'},
+            ),
+        )
+        project_query_reply = handle_feishu_message({'open_id': 'ou_project_query', 'chat_id': 'chat_project_query', 'message_id': 'mid-project-query', 'text': '福海创以前有没有项目', 'files': []}, load_config())
+        assert '福海创烟测历史项目' in project_query_reply
+        assert 'FHC-SMOKE-001' in project_query_reply
     finally:
         app_module.call_chat_completion = original_module_call_chat
 finally:
     if feishu_cargo_id:
         cleanup_market('cargo', feishu_cargo_id)
+    if feishu_newbuilding_id:
+        cleanup_market('newbuilding', feishu_newbuilding_id)
+    if feishu_query_cargo_id:
+        cleanup_market('cargo', feishu_query_cargo_id)
+    if feishu_query_newbuilding_id:
+        cleanup_market('newbuilding', feishu_query_newbuilding_id)
+    if feishu_project_id:
+        cleanup(feishu_project_id)
+    if feishu_query_project_id:
+        cleanup(feishu_query_project_id)
     save_config(original_config)
 
 users_resp = client.get('/api/users', headers=auth_headers)

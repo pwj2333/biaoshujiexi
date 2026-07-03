@@ -63,6 +63,7 @@ MARKET_SKILL_DIR = DATA_DIR / 'market_skill'
 FEISHU_DIR = DATA_DIR / 'feishu'
 FEISHU_SESSIONS_DIR = FEISHU_DIR / 'sessions'
 FEISHU_EVENTS_DIR = FEISHU_DIR / 'events'
+FEISHU_AGENT_LOGS_DIR = FEISHU_DIR / 'agent_logs'
 CONFIG_PATH = DATA_DIR / 'config.json'
 USERS_PATH = DATA_DIR / 'users.json'
 PACKAGE_EXTRACTION_TEMPLATE_PATH = PACKAGE_TEMPLATE_DIR / 'extraction_template.xlsx'
@@ -76,7 +77,7 @@ DEFAULT_ADMIN_USERNAME = 'ruico'
 DEFAULT_ADMIN_PASSWORD = 'Ruico668@'
 AUTH_COOKIE_NAME = 'bid_parser_token'
 
-for folder in (DATA_DIR, TMP_DIR, PROJECTS_DIR, MARKET_SKILL_DIR, FEISHU_DIR, FEISHU_SESSIONS_DIR, FEISHU_EVENTS_DIR):
+for folder in (DATA_DIR, TMP_DIR, PROJECTS_DIR, MARKET_SKILL_DIR, FEISHU_DIR, FEISHU_SESSIONS_DIR, FEISHU_EVENTS_DIR, FEISHU_AGENT_LOGS_DIR):
     folder.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title='标书解析与登记 Demo')
@@ -555,6 +556,12 @@ class MarketReportExportPayload(BaseModel):
 class ProjectPayload(BaseModel):
     title: str = ''
     source_file_name: str = ''
+    source_channel: str = ''
+    source_open_id: str = ''
+    source_chat_id: str = ''
+    source_message_id: str = ''
+    source_text: str = ''
+    confirmed_at: str = ''
     register_mode: str = 'packages'
     sheet_name: str = ''
     result: dict[str, Any] = Field(default_factory=dict)
@@ -1669,6 +1676,91 @@ def sanitize_feishu_reply(text: Any) -> str:
     return value[:3800]
 
 
+def sanitize_agent_log_value(value: Any) -> Any:
+    config = load_config()
+    secrets = [
+        str(config.get('api_key') or ''),
+        str(config.get('feishu_app_secret') or ''),
+        str(config.get('feishu_verification_token') or ''),
+        str(config.get('feishu_encrypt_key') or ''),
+        str(BASE_DIR),
+    ]
+
+    def sanitize_text(text: str) -> str:
+        cleaned = text
+        for secret in secrets:
+            if secret:
+                cleaned = cleaned.replace(secret, '[hidden]')
+        return cleaned
+
+    if isinstance(value, str):
+        return sanitize_text(value)
+    if isinstance(value, list):
+        return [sanitize_agent_log_value(item) for item in value]
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if any(secret_key in key_text.lower() for secret_key in ('api_key', 'secret', 'token', 'encrypt_key', 'authorization')):
+                sanitized[key_text] = '[hidden]' if item else ''
+            else:
+                sanitized[key_text] = sanitize_agent_log_value(item)
+        return sanitized
+    return value
+
+
+def write_feishu_agent_log(message: dict[str, Any], decision: dict[str, Any], tool_results: list[dict[str, Any]], reply: str, error: str = '') -> None:
+    payload = {
+        'id': uuid.uuid4().hex,
+        'created_at': datetime.now().isoformat(timespec='seconds'),
+        'open_id': message.get('open_id', ''),
+        'chat_id': message.get('chat_id', ''),
+        'message_id': message.get('message_id', ''),
+        'user_text': message.get('text', ''),
+        'files': message.get('files') or [],
+        'decision': decision,
+        'tool_results': tool_results,
+        'reply': reply,
+        'error': error,
+    }
+    safe_payload = sanitize_agent_log_value(payload)
+    date_dir = FEISHU_AGENT_LOGS_DIR / datetime.now().strftime('%Y%m%d')
+    date_dir.mkdir(parents=True, exist_ok=True)
+    path = date_dir / f"{payload['created_at'].replace(':', '').replace('-', '').replace('T', '_')}_{payload['id']}.json"
+    path.write_text(json.dumps(safe_payload, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def feishu_message_allowed(config: dict[str, Any], message: dict[str, Any]) -> bool:
+    allowed_open_ids = split_config_list(config.get('feishu_allowed_open_ids'))
+    allowed_chat_ids = split_config_list(config.get('feishu_allowed_chat_ids'))
+    if not allowed_open_ids and not allowed_chat_ids:
+        return True
+    open_id = compact_text(message.get('open_id'))
+    chat_id = compact_text(message.get('chat_id'))
+    return bool((open_id and open_id in allowed_open_ids) or (chat_id and chat_id in allowed_chat_ids))
+
+
+def load_feishu_agent_logs(date: str = '', limit: int = 50) -> list[dict[str, Any]]:
+    limit = max(1, min(limit, 500))
+    if date:
+        if not re.fullmatch(r'\d{8}', date):
+            raise HTTPException(status_code=400, detail='日志日期格式应为 YYYYMMDD。')
+        paths = sorted((FEISHU_AGENT_LOGS_DIR / date).glob('*.json'), key=lambda path: path.stat().st_mtime, reverse=True)
+    else:
+        paths = sorted(FEISHU_AGENT_LOGS_DIR.glob('*/*.json'), key=lambda path: path.stat().st_mtime, reverse=True)
+    items: list[dict[str, Any]] = []
+    for path in paths[:limit]:
+        try:
+            item = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(item, dict):
+            item['log_file'] = path.name
+            item['log_date'] = path.parent.name
+            items.append(item)
+    return items
+
+
 def feishu_help_text() -> str:
     return (
         '标书解析机器人可用指令：\n'
@@ -2222,9 +2314,13 @@ def feishu_skill_missing_fields(skill: str, text: str, slots: dict[str, Any]) ->
 
 def feishu_skill_next_question(skill: str, missing: list[str]) -> str:
     if skill == 'cargo_opportunity':
-        return '我先按商机货盘处理。请补一句装港、卸港、装载期，最好再带上货主或船舶方位。'
+        labels = {'cargo_name': '货名', 'tonnage': '吨数', 'load_port': '装港', 'discharge_port': '卸港'}
+        missing_text = '、'.join(labels.get(item, item) for item in missing) or '关键信息'
+        return f'我先按商机货盘处理。请补充：{missing_text}。'
     if skill == 'newbuilding_info':
-        return '我先按新造船信息处理。请补一句船名、船厂、船东、DWT 或建造阶段。'
+        labels = {'ship_name': '船名', 'shipyard': '船厂', 'owner': '船东', 'dwt': 'DWT'}
+        missing_text = '、'.join(labels.get(item, item) for item in missing) or '关键信息'
+        return f'我先按新造船信息处理。请补充：{missing_text}。'
     if skill == 'project_search':
         return '请告诉我项目名、招标编号，或者直接发“查询 + 关键词”。'
     if skill in {'cargo_report', 'newbuilding_report'}:
@@ -2252,9 +2348,12 @@ FEISHU_AGENT_TOOLS = {
     'extract_newbuilding_info',
     'update_pending_record',
     'save_pending_record',
+    'check_last_saved_record',
     'search_project',
+    'search_market_records',
     'parse_bid_file',
     'answer_bid_question',
+    'save_bid_project',
     'generate_market_report',
     'cancel_pending',
 }
@@ -2275,6 +2374,8 @@ def feishu_agent_session_view(session: dict[str, Any]) -> dict[str, Any]:
         'has_pending_record': bool(pending_record),
         'pending_kind': pending.get('kind', ''),
         'pending_record': pending_record,
+        'last_saved_record_id': (session.get('last_tool_result') or {}).get('saved_record_id', ''),
+        'last_saved_record_kind': (session.get('last_tool_result') or {}).get('saved_record_kind', ''),
         'has_bid_result': bool(session.get('last_result') and session.get('active_skill') == 'bid_parse'),
         'last_tool_result': session.get('last_tool_result', {}),
     }
@@ -2293,9 +2394,12 @@ def feishu_agent_decision_prompt(text: str, files: list[dict[str, str]], session
                 'extract_newbuilding_info': '从新造船资讯识别草稿，但不保存。',
                 'update_pending_record': '用户正在修改当前草稿，例如“装港改成宁波”。',
                 'save_pending_record': '用户明确确认保存当前草稿时使用。',
+                'check_last_saved_record': '用户询问刚才那条、上一条、是否保存成功、记录 ID 时使用。',
                 'search_project': '查询历史项目。',
+                'search_market_records': '查询商机货盘或新造船市场情报，可带 kind/query/status/stage/segment/board_type/start_date/end_date。',
                 'parse_bid_file': '用户上传标书文件并要求解析时使用。',
                 'answer_bid_question': '已有最近标书解析结果，用户继续追问标书内容时使用。',
+                'save_bid_project': '用户明确确认保存最近一次标书解析结果为项目时使用。',
                 'generate_market_report': '生成商机或新造船市场分析报告。',
                 'cancel_pending': '用户取消当前草稿或待办。',
             },
@@ -2308,6 +2412,39 @@ def feishu_agent_decision_prompt(text: str, files: list[dict[str, str]], session
         },
         ensure_ascii=False,
     )
+
+
+def feishu_agent_fallback_tool_call(text: str, files: list[dict[str, str]], session: dict[str, Any]) -> dict[str, Any] | None:
+    compact = compact_text(text)
+    pending = session.get('pending_confirm') if isinstance(session.get('pending_confirm'), dict) else {}
+    if pending.get('type') == 'market_record':
+        if any(word in compact for word in ('取消', '算了', '不要保存', '撤销')):
+            return {'name': 'cancel_pending', 'arguments': {}}
+        if compact in {'保存', '确认', '确认保存', '可以保存', '没问题'}:
+            return {'name': 'save_pending_record', 'arguments': {}}
+        if any(word in compact for word in ('改成', '改为', '调整为', '换成', '设为', '补充', '加上')):
+            return {'name': 'update_pending_record', 'arguments': {'text': compact}}
+    if session.get('active_skill') == 'bid_parse' and session.get('last_result'):
+        if compact in {'保存', '确认', '确认保存', '保存项目', '保存成项目'}:
+            return {'name': 'save_bid_project', 'arguments': {}}
+        if compact:
+            return {'name': 'answer_bid_question', 'arguments': {'question': compact}}
+    skill = feishu_skill_from_text(compact, files, session)
+    if skill == 'cargo_opportunity':
+        return {'name': 'extract_cargo_opportunity', 'arguments': {'text': compact}}
+    if skill == 'newbuilding_info':
+        return {'name': 'extract_newbuilding_info', 'arguments': {'text': compact}}
+    if skill == 'project_search':
+        if any(word in compact for word in ('货盘', '商机', '新造船', '船厂', '船东', '航线')):
+            return {'name': 'search_market_records', 'arguments': {'query': compact}}
+        return {'name': 'search_project', 'arguments': {'query': compact}}
+    if skill == 'bid_parse':
+        return {'name': 'parse_bid_file', 'arguments': {}}
+    if skill == 'cargo_report':
+        return {'name': 'generate_market_report', 'arguments': {'kind': 'cargo'}}
+    if skill == 'newbuilding_report':
+        return {'name': 'generate_market_report', 'arguments': {'kind': 'newbuilding'}}
+    return None
 
 
 def feishu_agent_decide(text: str, files: list[dict[str, str]], session: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
@@ -2342,6 +2479,10 @@ def feishu_agent_decide(text: str, files: list[dict[str, str]], session: dict[st
         cleaned_calls.append({'name': name, 'arguments': args})
     if not cleaned_calls:
         cleaned_calls = [{'name': 'chat_general', 'arguments': {}}]
+    if len(cleaned_calls) == 1 and cleaned_calls[0]['name'] == 'chat_general':
+        fallback_call = feishu_agent_fallback_tool_call(text, files, session)
+        if fallback_call:
+            cleaned_calls = [fallback_call]
     return {
         'reply': compact_text(decision.get('reply')),
         'tool_calls': cleaned_calls,
@@ -2374,8 +2515,42 @@ def feishu_agent_chat_reply(text: str, session: dict[str, Any], config: dict[str
     ).strip()
 
 
+def feishu_extract_direct_market_updates(kind: str, text: str) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    field_aliases = {
+        'cargo': {
+            'load_port': ['装港', '装货港', '起运港', '起始港'],
+            'discharge_port': ['卸港', '卸货港', '目的港', '到港'],
+            'cargo_name': ['货品', '货名', '品名'],
+            'tonnage': ['吨数', '货量', '吨位'],
+            'laycan': ['装期', '装载期', '受载期'],
+            'cargo_owner': ['货主', '租家', '客户'],
+            'board_type': ['货盘类型', '类型'],
+            'segment': ['业务板块', '板块'],
+        },
+        'newbuilding': {
+            'ship_name': ['船名'],
+            'shipyard': ['船厂', '造船厂'],
+            'owner': ['船东'],
+            'dwt': ['载重吨', 'DWT', 'dwt'],
+            'delivery_time': ['交付', '交付时间', '预计交付'],
+            'ship_type': ['船型'],
+            'stage': ['阶段', '建造阶段'],
+        },
+    }.get(kind, {})
+    for key, aliases in field_aliases.items():
+        for alias in aliases:
+            pattern = rf'{re.escape(alias)}\s*(?:改成|改为|调整为|换成|设为|是|为|：|:)\s*([^，,。；;\n]+)'
+            match = re.search(pattern, text, flags=re.I)
+            if match:
+                updates[key] = compact_text(match.group(1))
+                break
+    return updates
+
+
 def feishu_agent_merge_record(kind: str, current: dict[str, Any], text: str) -> dict[str, Any]:
     update = extract_market_record(kind, text)
+    update.update(feishu_extract_direct_market_updates(kind, text))
     merged = dict(current)
     for key, value in update.items():
         if key in {'id', 'kind', 'created_at', 'updated_at'}:
@@ -2385,6 +2560,18 @@ def feishu_agent_merge_record(kind: str, current: dict[str, Any], text: str) -> 
     raw_parts = [compact_text(current.get('raw_text')), text]
     merged['raw_text'] = '\n'.join(part for part in raw_parts if part)
     return normalize_market_record(kind, merged, record_id=compact_text(current.get('id')), created_at=compact_text(current.get('created_at')))
+
+
+def feishu_record_source_fields(message: dict[str, Any], *, confirmed_at: str = '') -> dict[str, str]:
+    return {
+        'source': '飞书',
+        'source_channel': 'feishu',
+        'source_open_id': compact_text(message.get('open_id')),
+        'source_chat_id': compact_text(message.get('chat_id')),
+        'source_message_id': compact_text(message.get('message_id')),
+        'source_text': compact_text(message.get('text')),
+        'confirmed_at': confirmed_at,
+    }
 
 
 def feishu_agent_execute_tool(call: dict[str, Any], message: dict[str, Any], session: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
@@ -2404,9 +2591,31 @@ def feishu_agent_execute_tool(call: dict[str, Any], message: dict[str, Any], ses
         pending = session.get('pending_confirm') if isinstance(session.get('pending_confirm'), dict) else {}
         if pending.get('type') != 'market_record':
             return {'tool': name, 'ok': False, 'error': '当前没有可保存的草稿。'}
-        record = save_market_record(str(pending.get('kind') or ''), pending.get('record') or {})
-        session.update({'active_skill': '', 'seed_text': '', 'slots': {}, 'missing': [], 'pending_confirm': {}, 'last_tool_result': {'saved_record_id': record.get('id')}})
-        return {'tool': name, 'ok': True, 'record': record, 'reply': f"已保存到市场情报台账，记录 ID：{record.get('id')}"}
+        raw_record = dict(pending.get('record') or {})
+        source_fields = feishu_record_source_fields(message, confirmed_at=datetime.now().isoformat(timespec='seconds'))
+        for key, value in source_fields.items():
+            if key in {'source', 'confirmed_at'} or not compact_text(raw_record.get(key)):
+                raw_record[key] = value
+        if compact_text(raw_record.get('raw_text')):
+            raw_record['source_text'] = compact_text(raw_record.get('raw_text'))
+        record_kind = str(pending.get('kind') or '')
+        record = save_market_record(record_kind, raw_record)
+        session.update({'active_skill': '', 'seed_text': '', 'slots': {}, 'missing': [], 'pending_confirm': {}, 'last_tool_result': {'tool': name, 'saved_record_kind': record_kind, 'saved_record_id': record.get('id'), 'saved_at': datetime.now().isoformat(timespec='seconds')}})
+        return {'tool': name, 'ok': True, 'saved_record_kind': record_kind, 'saved_record_id': record.get('id'), 'record': record, 'reply': f"已保存到市场情报台账，记录 ID：{record.get('id')}"}
+
+    if name == 'check_last_saved_record':
+        last_result = session.get('last_tool_result') if isinstance(session.get('last_tool_result'), dict) else {}
+        record_id = compact_text(args.get('record_id') or last_result.get('saved_record_id'))
+        kind = compact_text(args.get('kind') or last_result.get('saved_record_kind'))
+        if kind not in {'cargo', 'newbuilding'} or not record_id:
+            return {'tool': name, 'ok': False, 'error': '我这里没有最近保存记录的上下文。'}
+        path = market_record_path(kind, record_id)
+        if not path.exists():
+            return {'tool': name, 'ok': False, 'kind': kind, 'record_id': record_id, 'error': f'最近记录 {record_id} 未在台账中找到，可能已被删除或数据目录已更换。'}
+        record = load_market_record(kind, record_id)
+        label = '商机货盘' if kind == 'cargo' else '新造船信息'
+        title = record.get('cargo_name') or record.get('ship_name') or record.get('route') or record.get('owner') or '未命名'
+        return {'tool': name, 'ok': True, 'kind': kind, 'record_id': record_id, 'record': record, 'reply': f'刚才那条{label}已经保存，记录 ID：{record_id}，摘要：{title}。'}
 
     if name in {'extract_cargo_opportunity', 'extract_newbuilding_info'}:
         kind = 'cargo' if name == 'extract_cargo_opportunity' else 'newbuilding'
@@ -2451,6 +2660,53 @@ def feishu_agent_execute_tool(call: dict[str, Any], message: dict[str, Any], ses
         items, _ = collect_project_items(q=query)
         return {'tool': name, 'ok': True, 'query': query, 'items': items[:5], 'reply': format_project_search(items)}
 
+    if name == 'search_market_records':
+        query = compact_text(args.get('query') or args.get('q') or text)
+        kind = compact_text(args.get('kind'))
+        if kind not in {'cargo', 'newbuilding'}:
+            kind = 'newbuilding' if any(word in query for word in ('新造船', '船厂', '船东', 'DWT', '交付')) else 'cargo'
+        items, stats = list_market_records(
+            kind,
+            q=query,
+            segment=compact_text(args.get('segment')),
+            board_type=compact_text(args.get('board_type')),
+            status=compact_text(args.get('status')),
+            stage=compact_text(args.get('stage')),
+        )
+        start_date = compact_text(args.get('start_date'))
+        end_date = compact_text(args.get('end_date'))
+        if start_date or end_date:
+            date_key = 'cargo_date' if kind == 'cargo' else 'update_date'
+            items = [
+                item
+                for item in items
+                if (not start_date or compact_text(item.get(date_key)) >= start_date)
+                and (not end_date or compact_text(item.get(date_key)) <= end_date)
+            ]
+        if not items and kind == 'cargo':
+            query_parts = []
+            cargo_record = guess_market_cargo(query)
+            for key in ('cargo_name', 'load_port', 'discharge_port', 'cargo_owner'):
+                value = compact_text(cargo_record.get(key))
+                if value:
+                    query_parts.append(value)
+            for part in query_parts:
+                items, stats = list_market_records(kind, q=part)
+                if items:
+                    break
+        label = '商机货盘' if kind == 'cargo' else '新造船'
+        if not items:
+            return {'tool': name, 'ok': True, 'kind': kind, 'query': query, 'items': [], 'stats': stats, 'reply': f'没有查到匹配的{label}记录，可以换个货品、航线、船厂或时间关键词。'}
+        filter_parts = [part for part in [query, compact_text(args.get('status') or args.get('stage')), start_date and f'{start_date}起', end_date and f'{end_date}止'] if part]
+        lines = [f"我查了系统里的{label}台账（条件：{' / '.join(filter_parts) or '全部'}），共找到 {len(items)} 条，先汇总前 5 条："]
+        for index, item in enumerate(items[:5], 1):
+            if kind == 'cargo':
+                lines.append(f"{index}. {item.get('cargo_name') or '-'} | {item.get('tonnage') or '-'} | {item.get('load_port') or '-'} -> {item.get('discharge_port') or '-'} | {item.get('status') or '-'} | ID：{item.get('id')}")
+            else:
+                lines.append(f"{index}. {item.get('ship_name') or item.get('owner') or '-'} | {item.get('shipyard') or '-'} | {item.get('dwt') or '-'} | {item.get('stage') or '-'} | ID：{item.get('id')}")
+        lines.append('这些结果来自当前系统台账；没有出现在台账里的信息我不会编造。')
+        return {'tool': name, 'ok': True, 'kind': kind, 'query': query, 'items': items[:5], 'stats': stats, 'reply': '\n'.join(lines)}
+
     if name == 'generate_market_report':
         kind = compact_text(args.get('kind') or ('newbuilding' if '新造船' in text else 'cargo'))
         if kind not in {'cargo', 'newbuilding'}:
@@ -2473,12 +2729,43 @@ def feishu_agent_execute_tool(call: dict[str, Any], message: dict[str, Any], ses
         session['last_question'] = text
         return {'tool': name, 'ok': True, 'reply': answer}
 
+    if name == 'save_bid_project':
+        result = session.get('last_result') if isinstance(session.get('last_result'), dict) else {}
+        if not result:
+            return {'tool': name, 'ok': False, 'error': '当前没有可保存的标书解析结果，请先上传并解析标书。'}
+        summary = result.get('document_summary') if isinstance(result.get('document_summary'), dict) else {}
+        project_id = uuid.uuid4().hex
+        source_file_name = compact_text(args.get('source_file_name') or session.get('last_file_name') or message.get('file_name'))
+        source_note = '飞书确认保存'
+        if message.get('message_id'):
+            source_note += f"；message_id={message.get('message_id')}"
+        project = save_project(
+            project_id,
+            ProjectPayload(
+                title=compact_text(summary.get('project_name')) or '飞书标书解析项目',
+                source_file_name=source_file_name,
+                source_channel='feishu',
+                source_open_id=compact_text(message.get('open_id')),
+                source_chat_id=compact_text(message.get('chat_id')),
+                source_message_id=compact_text(message.get('message_id')),
+                source_text=compact_text(session.get('last_parse_text') or session.get('last_question') or message.get('text')),
+                confirmed_at=datetime.now().isoformat(timespec='seconds'),
+                sheet_name=str(datetime.now().year),
+                result=result,
+                follow_up={'bid_status': '待跟进', 'award_status': '未知', 'information_source': '飞书', 'register_year': str(datetime.now().year)},
+                timeline=[{'date': today_text(), 'type': 'parse', 'note': source_note}],
+            ),
+        )
+        session.update({'last_tool_result': {'tool': name, 'saved_project_id': project_id, 'saved_at': datetime.now().isoformat(timespec='seconds')}})
+        return {'tool': name, 'ok': True, 'saved_project_id': project_id, 'project': project, 'reply': f"已保存到历史项目台账，项目 ID：{project_id}"}
+
     if name == 'parse_bid_file':
         if not files:
             return {'tool': name, 'ok': False, 'error': '请在飞书里同时上传 PDF/DOC/DOCX/XLS/XLSX 标书文件。'}
         file_info = files[0]
-        temp_path = feishu_download_file(config, message.get('message_id', ''), file_info.get('file_key', ''), file_info.get('file_name', ''))
+        temp_path: Path | None = None
         try:
+            temp_path = feishu_download_file(config, message.get('message_id', ''), file_info.get('file_key', ''), file_info.get('file_name', ''))
             suffix = Path(file_info.get('file_name') or temp_path.name).suffix.lower() or temp_path.suffix.lower()
             if suffix not in {'.pdf', '.doc', '.docx', '.xls', '.xlsx'}:
                 raise HTTPException(status_code=400, detail='当前只支持 PDF、DOC、DOCX、XLS、XLSX 标书文件。')
@@ -2486,10 +2773,13 @@ def feishu_agent_execute_tool(call: dict[str, Any], message: dict[str, Any], ses
             if len(document_text.strip()) < 80:
                 raise HTTPException(status_code=400, detail='当前版本只支持可提取文本的文件，扫描件暂不支持。')
             result = parse_ai_document(document_text, require_config())
-            session.update({'active_skill': 'bid_parse', 'last_result': result, 'last_question': text, 'pending_confirm': {}})
+            session.update({'active_skill': 'bid_parse', 'last_result': result, 'last_question': text, 'last_parse_text': text, 'last_file_name': file_info.get('file_name', ''), 'pending_confirm': {}})
             return {'tool': name, 'ok': True, 'result': result, 'reply': feishu_skill_preview_bid(result)}
+        except HTTPException as exc:
+            return {'tool': name, 'ok': False, 'error': compact_text(exc.detail)}
         finally:
-            temp_path.unlink(missing_ok=True)
+            if temp_path:
+                temp_path.unlink(missing_ok=True)
 
     return {'tool': name, 'ok': False, 'error': '工具不在白名单内。'}
 
@@ -2783,12 +3073,18 @@ def handle_feishu_message(message: dict[str, Any], config: dict[str, Any]) -> st
     chat_id = message.get('chat_id', '')
     text = compact_text(message.get('text') or '')
     files = message.get('files') or []
+    if not feishu_message_allowed(config, message):
+        reply = '你当前没有权限使用这个飞书 Agent，请联系管理员把你的 open_id 或群 chat_id 加入允许列表。'
+        write_feishu_agent_log(message, {}, [], reply, error='unauthorized_feishu_user')
+        return reply
     session = feishu_dialog_load(open_id, chat_id)
     try:
         decision = feishu_agent_decide(text, files, session, config)
     except HTTPException as exc:
         if exc.status_code == 400 and 'AI 暂不可用' in str(exc.detail):
-            return compact_text(exc.detail)
+            reply = compact_text(exc.detail)
+            write_feishu_agent_log(message, {}, [], reply, error=reply)
+            return reply
         raise
 
     tool_results: list[dict[str, Any]] = []
@@ -2808,19 +3104,27 @@ def handle_feishu_message(message: dict[str, Any], config: dict[str, Any]) -> st
 
     explicit_reply = compact_text(decision.get('reply'))
     if explicit_reply and not any(result.get('tool') != 'chat_general' for result in tool_results):
+        write_feishu_agent_log(message, decision, tool_results, explicit_reply)
         return explicit_reply
     try:
         reply = feishu_agent_chat_reply(text, session, config, tool_results)
         if reply:
+            write_feishu_agent_log(message, decision, tool_results, reply)
             return reply
     except HTTPException:
         pass
     for result in tool_results:
         if result.get('reply'):
-            return sanitize_feishu_reply(result.get('reply'))
+            reply = sanitize_feishu_reply(result.get('reply'))
+            write_feishu_agent_log(message, decision, tool_results, reply)
+            return reply
         if result.get('error'):
-            return f"处理时遇到问题：{compact_text(result.get('error'))}"
-    return 'AI 已处理这条消息，但没有生成可发送的回复。'
+            reply = f"处理时遇到问题：{compact_text(result.get('error'))}"
+            write_feishu_agent_log(message, decision, tool_results, reply, error=compact_text(result.get('error')))
+            return reply
+    reply = 'AI 已处理这条消息，但没有生成可发送的回复。'
+    write_feishu_agent_log(message, decision, tool_results, reply, error='empty_reply')
+    return reply
 
 
 def process_feishu_event(message: dict[str, Any], config: dict[str, Any]) -> None:
@@ -2977,6 +3281,8 @@ def project_meta(project: dict[str, Any]) -> dict[str, Any]:
         'project_id': project['project_id'],
         'title': project.get('title', ''),
         'source_file_name': project.get('source_file_name', ''),
+        'source_channel': project.get('source_channel', ''),
+        'source_message_id': project.get('source_message_id', ''),
         'register_mode': project.get('register_mode', 'packages'),
         'sheet_name': project.get('sheet_name', ''),
         'created_at': project.get('created_at', ''),
@@ -3010,6 +3316,12 @@ def read_project_file(path: Path) -> dict[str, Any] | None:
         'project_id': project_id,
         'title': compact_text(raw.get('title')),
         'source_file_name': compact_text(raw.get('source_file_name')),
+        'source_channel': compact_text(raw.get('source_channel')),
+        'source_open_id': compact_text(raw.get('source_open_id')),
+        'source_chat_id': compact_text(raw.get('source_chat_id')),
+        'source_message_id': compact_text(raw.get('source_message_id')),
+        'source_text': compact_text(raw.get('source_text')),
+        'confirmed_at': compact_text(raw.get('confirmed_at')),
         'register_mode': compact_text(raw.get('register_mode') or 'packages') or 'packages',
         'sheet_name': sheet_name,
         'created_at': compact_text(raw.get('created_at')),
@@ -3047,6 +3359,12 @@ def save_project(project_id: str, payload: ProjectPayload, *, created_at: str | 
         'project_id': project_id,
         'title': title,
         'source_file_name': compact_text(payload.source_file_name),
+        'source_channel': compact_text(payload.source_channel),
+        'source_open_id': compact_text(payload.source_open_id),
+        'source_chat_id': compact_text(payload.source_chat_id),
+        'source_message_id': compact_text(payload.source_message_id),
+        'source_text': compact_text(payload.source_text),
+        'confirmed_at': compact_text(payload.confirmed_at),
         'register_mode': payload.register_mode if payload.register_mode in {'packages', 'document'} else 'packages',
         'sheet_name': sheet_name,
         'created_at': created_at or now,
@@ -3732,6 +4050,12 @@ def normalize_market_cargo(raw: Any, *, record_id: str = '', created_at: str = '
         'competitor_price': market_text(source.get('competitor_price')),
         'remark': market_text(source.get('remark')),
         'raw_text': market_text(source.get('raw_text')),
+        'source_channel': market_text(source.get('source_channel')),
+        'source_open_id': market_text(source.get('source_open_id')),
+        'source_chat_id': market_text(source.get('source_chat_id')),
+        'source_message_id': market_text(source.get('source_message_id')),
+        'source_text': market_text(source.get('source_text')),
+        'confirmed_at': market_text(source.get('confirmed_at')),
         'created_at': created_at or market_text(source.get('created_at')) or now,
         'updated_at': now,
     }
@@ -3764,6 +4088,12 @@ def normalize_market_newbuilding(raw: Any, *, record_id: str = '', created_at: s
         'source': market_text(source.get('source') or '手动录入'),
         'remark': market_text(source.get('remark')),
         'raw_text': market_text(source.get('raw_text')),
+        'source_channel': market_text(source.get('source_channel')),
+        'source_open_id': market_text(source.get('source_open_id')),
+        'source_chat_id': market_text(source.get('source_chat_id')),
+        'source_message_id': market_text(source.get('source_message_id')),
+        'source_text': market_text(source.get('source_text')),
+        'confirmed_at': market_text(source.get('confirmed_at')),
         'created_at': created_at or market_text(source.get('created_at')) or now,
         'updated_at': now,
     }
@@ -4325,10 +4655,18 @@ def guess_market_cargo(text: str) -> dict[str, Any]:
     if route_match:
         record['load_port'] = route_match.group(1).strip()
         record['discharge_port'] = route_match.group(2).strip()
+    load_match = re.search(r'(?:装港|装货港|起运港|从|由)?\s*([\u4e00-\u9fa5A-Za-z0-9·（）()]{2,20})\s*(?:装|装出|起运)', text)
+    if load_match and not record.get('load_port'):
+        record['load_port'] = load_match.group(1).strip()
+    discharge_match = re.search(r'(?:卸港|卸货港|目的港|到|至)?\s*([\u4e00-\u9fa5A-Za-z0-9·（）()]{2,20})\s*(?:卸|卸货|到港)', text)
+    if discharge_match and not record.get('discharge_port'):
+        record['discharge_port'] = discharge_match.group(1).strip()
     cargo_match = re.search(r'(?:\d+(?:\.\d+)?\s*(?:吨|t|T)\s*)?([\u4e00-\u9fa5A-Za-z0-9]{2,18})(?:，|,|、|\s)', text)
     if cargo_match:
         record['cargo_name'] = cargo_match.group(1).strip()
-    owner_match = re.search(r'([\u4e00-\u9fa5A-Za-z0-9]{2,18})(?:的计划|计划|货盘)', text)
+    owner_match = re.search(r'(?:货主|租家|客户)[：:\s]*([\u4e00-\u9fa5A-Za-z0-9]{2,18})', text)
+    if not owner_match:
+        owner_match = re.search(r'([\u4e00-\u9fa5A-Za-z0-9]{2,18})(?:的计划|计划|货盘)', text)
     if owner_match:
         record['cargo_owner'] = owner_match.group(1).strip()
     if '月内' in text:
@@ -4364,9 +4702,13 @@ def guess_market_newbuilding(text: str) -> dict[str, Any]:
     if yard_match:
         record['shipyard'] = yard_match.group(1)
     owner_match = re.search(r'(?:船东|订造方|owner)[：:\s]*([\u4e00-\u9fa5A-Za-z0-9·（）()]{2,24})', text, re.I)
+    if not owner_match:
+        owner_match = re.search(r'为\s*([\u4e00-\u9fa5A-Za-z0-9·（）()]{2,24}船东)\s*(?:建造|订造)', text)
     if owner_match:
         record['owner'] = owner_match.group(1)
     ship_match = re.search(r'(?:船名|命名为|名为)[：:\s]*([\u4e00-\u9fa5A-Za-z0-9·（）()#-]{2,24})', text)
+    if not ship_match:
+        ship_match = re.search(r'^([\u4e00-\u9fa5A-Za-z0-9·（）()#-]{2,24}船[\u4e00-\u9fa5A-Za-z0-9·（）()#-]*)\s*(?:，|,|。|\s)', text)
     if ship_match:
         record['ship_name'] = ship_match.group(1)
     if '化学品' in text:
@@ -4545,6 +4887,27 @@ def test_feishu_message(payload: FeishuTestPayload, _: dict[str, Any] = Depends(
         raise HTTPException(status_code=400, detail='请先启用飞书机器人。')
     feishu_send_message(config, payload.receive_id_type, payload.receive_id.strip(), payload.text)
     return {'ok': True}
+
+
+@app.get('/api/feishu/agent-logs')
+def feishu_agent_logs(date: str = '', limit: int = 50, _: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    items = load_feishu_agent_logs(date=date, limit=limit)
+    return {'items': items, 'count': len(items)}
+
+
+@app.get('/api/export/feishu-agent-logs')
+def export_feishu_agent_logs(date: str = '', limit: int = 500, _: dict[str, Any] = Depends(require_admin)) -> StreamingResponse:
+    items = load_feishu_agent_logs(date=date, limit=limit)
+    output = io.BytesIO()
+    for item in items:
+        output.write(json.dumps(item, ensure_ascii=False).encode('utf-8') + b'\n')
+    output.seek(0)
+    filename = f"feishu-agent-logs-{date or datetime.now().strftime('%Y%m%d')}.jsonl"
+    return StreamingResponse(
+        output,
+        media_type='application/x-ndjson',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post('/api/feishu/events')
@@ -4934,12 +5297,18 @@ def handle_feishu_message(message: dict[str, Any], config: dict[str, Any]) -> st
     chat_id = message.get('chat_id', '')
     text = compact_text(message.get('text') or '')
     files = message.get('files') or []
+    if not feishu_message_allowed(config, message):
+        reply = '你当前没有权限使用这个飞书 Agent，请联系管理员把你的 open_id 或群 chat_id 加入允许列表。'
+        write_feishu_agent_log(message, {}, [], reply, error='unauthorized_feishu_user')
+        return reply
     session = feishu_dialog_load(open_id, chat_id)
     try:
         decision = feishu_agent_decide(text, files, session, config)
     except HTTPException as exc:
         if exc.status_code == 400 and 'AI 暂不可用' in str(exc.detail):
-            return compact_text(exc.detail)
+            reply = compact_text(exc.detail)
+            write_feishu_agent_log(message, {}, [], reply, error=reply)
+            return reply
         raise
 
     tool_results: list[dict[str, Any]] = []
@@ -4959,19 +5328,27 @@ def handle_feishu_message(message: dict[str, Any], config: dict[str, Any]) -> st
 
     explicit_reply = compact_text(decision.get('reply'))
     if explicit_reply and not any(result.get('tool') != 'chat_general' for result in tool_results):
+        write_feishu_agent_log(message, decision, tool_results, explicit_reply)
         return explicit_reply
     try:
         reply = feishu_agent_chat_reply(text, session, config, tool_results)
         if reply:
+            write_feishu_agent_log(message, decision, tool_results, reply)
             return reply
     except HTTPException:
         pass
     for result in tool_results:
         if result.get('reply'):
-            return sanitize_feishu_reply(result.get('reply'))
+            reply = sanitize_feishu_reply(result.get('reply'))
+            write_feishu_agent_log(message, decision, tool_results, reply)
+            return reply
         if result.get('error'):
-            return f"处理时遇到问题：{compact_text(result.get('error'))}"
-    return 'AI 已处理这条消息，但没有生成可发送的回复。'
+            reply = f"处理时遇到问题：{compact_text(result.get('error'))}"
+            write_feishu_agent_log(message, decision, tool_results, reply, error=compact_text(result.get('error')))
+            return reply
+    reply = 'AI 已处理这条消息，但没有生成可发送的回复。'
+    write_feishu_agent_log(message, decision, tool_results, reply, error='empty_reply')
+    return reply
 
 
 def process_feishu_event(message: dict[str, Any], config: dict[str, Any]) -> None:
@@ -4979,9 +5356,11 @@ def process_feishu_event(message: dict[str, Any], config: dict[str, Any]) -> Non
         reply = handle_feishu_message(message, config)
     except HTTPException as exc:
         reply = f'处理时遇到问题：{compact_text(exc.detail)}'
+        write_feishu_agent_log(message, {}, [], reply, error=compact_text(exc.detail))
     except Exception as exc:
         print(f'Feishu agent error: {exc}')
         reply = '处理时遇到问题：AI 暂时没法完成这次请求，请稍后再试。'
+        write_feishu_agent_log(message, {}, [], reply, error=str(exc))
     try:
         feishu_reply_message(config, message.get('message_id', ''), sanitize_feishu_reply(reply))
     except Exception as exc:

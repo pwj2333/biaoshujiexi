@@ -15,6 +15,7 @@
   - 招标登记 Excel
   - 解析总览 Markdown
 - 将项目结果保存为本地历史记录，便于后续查询和复用
+- 通过飞书与配置好的 AI Agent 对话，录入商机货盘、新造船信息、解析标书、查询台账
 
 ## 核心能力
 
@@ -35,6 +36,12 @@
 
 - 历史记录管理：
   当前解析结果可保存到本地 JSON 文件中，后续可从左侧历史记录菜单查询并重新打开。
+
+- 飞书 AI Agent：
+  普通聊天由 AI 自然回复；业务消息会由 Agent 调用后端白名单工具完成草稿识别、查询、标书解析和确认保存。写入类动作必须先生成草稿，用户明确回复“确认保存/保存”后才会落库。
+
+- 市场情报：
+  支持商机货盘和新造船信息录入、AI 识别、市场分析、台账查询和导出。飞书保存的记录会保留来源、open_id、chat_id、message_id、原始消息和确认时间。
 
 ## 技术方案
 
@@ -68,6 +75,8 @@ biaoshujiexi/
 ├─ data/                     # 本地运行数据
 │  ├─ config.json            # AI 配置
 │  ├─ projects/              # 历史记录
+│  ├─ market_skill/           # 商机货盘和新造船市场情报
+│  ├─ feishu/                 # 飞书会话、事件和 Agent 日志
 │  └─ tmp/                   # 临时上传文件
 └─ 招标文件/                  # 本地测试用标书样本（默认不提交）
 ```
@@ -199,12 +208,102 @@ docker run -d \
   ghcr.io/pwj2333/biaoshujiexi:latest
 ```
 
+如果服务器上使用固定目录保存数据，也可以这样挂载：
+
+```bash
+docker rm -f biaoshujiexi || true
+docker pull ghcr.io/pwj2333/biaoshujiexi:latest
+docker run -d \
+  --name biaoshujiexi \
+  --restart unless-stopped \
+  -p 8008:8008 \
+  -v /opt/biaoshujiexi/data:/app/data \
+  ghcr.io/pwj2333/biaoshujiexi:latest
+```
+
 查看容器内配置是否已保存：
 
 ```bash
 docker exec -it biaoshujiexi ls -l /app/data
 docker exec -it biaoshujiexi cat /app/data/config.json
 ```
+
+查看容器日志：
+
+```bash
+docker logs --tail=200 biaoshujiexi
+docker logs -f biaoshujiexi
+```
+
+进入容器检查数据目录：
+
+```bash
+docker exec -it biaoshujiexi sh
+ls -R /app/data
+```
+
+## 飞书 Agent 配置
+
+在网页左侧 `AI 配置` 中保存 Base URL、API Key、模型名称。这些配置会永久保存到 `/app/data/config.json`，容器重建后只要 `/app/data` 挂载不变，就不需要重新填写。
+
+在网页左侧 `飞书机器人` 中保存：
+
+- App ID
+- App Secret
+- Verification Token
+- Encrypt Key（如果飞书事件回调启用了加密）
+- 接收模式：HTTP 回调或长连接
+- 允许 open_id / 允许 chat_id（可选，留空表示不限制）
+
+HTTP 回调地址为：
+
+```text
+https://你的域名或公网地址/api/feishu/events
+```
+
+飞书消息行为：
+
+- 普通聊天：由 AI 自然回复，不返回固定菜单。
+- 商机货盘：生成草稿，用户确认后保存到市场情报台账。
+- 新造船：生成草稿，用户确认后保存到新造船台账。
+- 标书文件：上传 PDF/DOC/DOCX/XLS/XLSX 并发送“解析标书”，解析结果会进入当前飞书会话，后续可继续追问，也可确认保存为历史项目。
+- 查询台账：Agent 会查询系统已有项目和市场情报，不编造不存在的记录。
+
+## Agent 日志
+
+每次飞书 Agent 对话都会写入日志：
+
+```text
+/app/data/feishu/agent_logs/YYYYMMDD/*.json
+```
+
+日志包含 open_id、chat_id、message_id、用户原文、AI 决策 JSON、工具调用结果、回复内容和错误原因，并隐藏 API Key、飞书密钥、服务器路径等敏感信息。
+
+管理员登录后可通过接口查看或导出：
+
+```text
+GET /api/feishu/agent-logs?limit=50
+GET /api/feishu/agent-logs?date=20260703&limit=100
+GET /api/export/feishu-agent-logs?date=20260703&limit=500
+```
+
+## 常见排障
+
+标书在本地可解析、服务器失败时，优先检查：
+
+```bash
+docker logs --tail=300 biaoshujiexi
+docker exec -it biaoshujiexi ls -l /app/data
+docker exec -it biaoshujiexi cat /app/data/config.json
+```
+
+常见原因：
+
+- `/app/data` 没有挂载，导致 AI 配置或飞书配置没有持久化。
+- 服务器网络无法访问配置的 AI Base URL。
+- 上传的是扫描件 PDF，当前版本不支持 OCR。
+- 飞书文件权限或 file_key 下载失败。
+- 模板文件缺失或容器镜像不是最新版本。
 
 ## 打包与交付注意事项
 

@@ -5,6 +5,7 @@ const state = {
   sessionId: '',
   currentProjectId: '',
   sourceFileName: '',
+  projectSource: {},
   documentTextExcerpt: '',
   documentTextFull: '',
   packageCount: 0,
@@ -218,6 +219,10 @@ function renderCurrentUser() {
   if (userNavBtn) {
     userNavBtn.classList.toggle('hidden', user?.role !== 'admin');
   }
+  const userPanel = $('userPanel');
+  if (userPanel) {
+    userPanel.classList.toggle('hidden', user?.role !== 'admin');
+  }
 }
 
 function renderUserList() {
@@ -258,13 +263,34 @@ function setStatus(id, text, className = 'neutral') {
   node.className = `pill ${className}`;
 }
 
+function switchWorkspace(workspaceId) {
+  document.querySelectorAll('.main-tab').forEach((node) => {
+    node.classList.toggle('active', node.dataset.workspace === workspaceId);
+  });
+  document.querySelectorAll('.business-workspace').forEach((node) => {
+    node.classList.toggle('active', node.id === workspaceId);
+  });
+  if (workspaceId === 'marketWorkspace') {
+    const marketPanel = $('marketSkillPanel');
+    if (marketPanel) marketPanel.classList.remove('hidden');
+  }
+}
+
 function switchPanel(targetId) {
+  switchWorkspace('bidWorkspace');
   document.querySelectorAll('.nav-link').forEach((node) => {
     node.classList.toggle('active', node.dataset.target === targetId);
   });
-  document.querySelectorAll('.content-panel').forEach((node) => {
+  document.querySelectorAll('#bidWorkspace .content-panel').forEach((node) => {
     node.classList.toggle('hidden', node.id !== targetId);
   });
+}
+
+function toggleSettings(forceOpen = null) {
+  const panel = $('settingsPanel');
+  if (!panel) return;
+  const shouldOpen = forceOpen === null ? panel.classList.contains('hidden') : forceOpen;
+  panel.classList.toggle('hidden', !shouldOpen);
 }
 
 function statusClass(status) {
@@ -357,6 +383,12 @@ function currentProjectPayload() {
   return {
     title: $('projectTitle').value.trim(),
     source_file_name: state.sourceFileName,
+    source_channel: state.projectSource.source_channel || '',
+    source_open_id: state.projectSource.source_open_id || '',
+    source_chat_id: state.projectSource.source_chat_id || '',
+    source_message_id: state.projectSource.source_message_id || '',
+    source_text: state.projectSource.source_text || '',
+    confirmed_at: state.projectSource.confirmed_at || '',
     register_mode: $('registerMode').value,
     sheet_name: $('sheetName').value.trim(),
     result: collectResultPayload(),
@@ -372,6 +404,7 @@ function clearCurrentProject() {
   state.currentProjectId = '';
   state.sessionId = '';
   state.sourceFileName = '';
+  state.projectSource = {};
   state.documentTextExcerpt = '';
   state.documentTextFull = '';
   state.packageCount = 0;
@@ -422,6 +455,28 @@ function renderSummary(summary) {
   $('summaryPanel').innerHTML = items
     .map(([label, value]) => `<article class="summary-card"><span>${label}</span><strong>${value || '-'}</strong></article>`)
     .join('');
+  renderProjectSourceSummary();
+}
+
+function renderProjectSourceSummary() {
+  const source = state.projectSource || {};
+  const isFeishu = source.source_channel === 'feishu';
+  if (!isFeishu && !source.source_text) return;
+  const meta = [
+    isFeishu ? '飞书录入' : source.source_channel || '来源记录',
+    source.confirmed_at ? `确认：${String(source.confirmed_at).replace('T', ' ')}` : '',
+    source.source_message_id ? `消息：${source.source_message_id}` : '',
+  ].filter(Boolean);
+  $('summaryPanel').insertAdjacentHTML(
+    'beforeend',
+    `
+      <article class="summary-card project-source-summary">
+        <span>数据来源</span>
+        <strong>${meta.map((item) => `<em>${escapeHtml(item)}</em>`).join('')}</strong>
+        ${source.source_text ? `<small>${escapeHtml(source.source_text)}</small>` : ''}
+      </article>
+    `
+  );
 }
 
 function renderAnalysis(analysis) {
@@ -732,6 +787,7 @@ function renderProjectList() {
             <span>${project.tenderer || '暂无招标人'}</span>
             <span>${project.register_year || '未填年份'}</span>
             <span>${project.bid_status || '待跟进'}</span>
+            ${project.source_channel === 'feishu' ? '<span class="source-chip feishu">飞书录入</span>' : ''}
           </div>
           <small>${(project.updated_at || '').replace('T', ' ')}</small>
         </button>
@@ -827,6 +883,39 @@ function marketInputMarkup(field, value) {
   return `<input data-type="market-field" data-key="${field.key}" value="${value || ''}" ${field.type === 'date' ? 'type="date"' : ''} />`;
 }
 
+function marketSourceLabel(item = {}) {
+  return item.source_channel === 'feishu' || item.source === '飞书' ? '飞书录入' : item.source || '手动录入';
+}
+
+function marketSourceText(item = {}) {
+  return item.source_text || item.raw_text || '';
+}
+
+function renderMarketSourceSummary() {
+  const node = $('marketSourceSummary');
+  if (!node) return;
+  const record = state.marketRecord || {};
+  const isFeishu = record.source_channel === 'feishu' || record.source === '飞书';
+  const sourceText = marketSourceText(record);
+  if (!isFeishu && !sourceText) {
+    node.classList.add('hidden');
+    node.innerHTML = '';
+    return;
+  }
+  const meta = [
+    marketSourceLabel(record),
+    record.confirmed_at ? `确认：${record.confirmed_at.replace('T', ' ')}` : '',
+    record.source_message_id ? `消息：${record.source_message_id}` : '',
+  ].filter(Boolean);
+  node.classList.remove('hidden');
+  node.innerHTML = `
+    <div class="market-source-head">
+      ${meta.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}
+    </div>
+    ${sourceText ? `<p>${escapeHtml(sourceText)}</p>` : ''}
+  `;
+}
+
 function renderMarketForm() {
   if (!$('marketForm')) return;
   $('marketFormTitle').textContent = state.marketKind === 'cargo' ? '商机录入' : '新造船录入';
@@ -849,6 +938,7 @@ function renderMarketForm() {
     node.oninput = handler;
     node.onchange = handler;
   });
+  renderMarketSourceSummary();
 }
 
 function renderMarketFilters() {
@@ -1041,6 +1131,8 @@ function renderMarketList() {
         state.marketKind === 'cargo'
           ? `${item.tonnage || '-'} | ${item.cargo_owner || '-'} | ${item.final_price || '未录成交价'}`
           : `${item.dwt || '-'} | ${item.owner || '-'} | ${item.delivery_time || '-'}`;
+      const sourceLabel = marketSourceLabel(item);
+      const sourceText = marketSourceText(item);
       return `
         <button class="project-item market-item ${item.id === state.marketCurrentId ? 'active' : ''}" data-market-id="${item.id}">
           <div class="project-card-head">
@@ -1051,8 +1143,10 @@ function renderMarketList() {
           <div class="project-tags">
             <span>${state.marketKind === 'cargo' ? item.board_type : item.build_status || '状态待补'}</span>
             <span>${state.marketKind === 'cargo' ? item.segment : item.ship_type || '船型待补'}</span>
+            <span class="${item.source_channel === 'feishu' || item.source === '飞书' ? 'source-chip feishu' : 'source-chip'}">${escapeHtml(sourceLabel)}</span>
             <span>${(item.updated_at || '').replace('T', ' ')}</span>
           </div>
+          ${sourceText ? `<small class="market-source-preview">${escapeHtml(sourceText)}</small>` : ''}
         </button>
       `;
     })
@@ -1286,6 +1380,8 @@ async function loadConfig() {
     $('feishuAppSecret').value = '';
     $('feishuVerificationToken').value = '';
     $('feishuEncryptKey').value = '';
+    $('feishuAllowedOpenIds').value = config.feishu_allowed_open_ids || '';
+    $('feishuAllowedChatIds').value = config.feishu_allowed_chat_ids || '';
     setStatus('feishuStatus', config.feishu_enabled ? '已启用' : '未启用', config.feishu_enabled ? 'ok' : 'neutral');
   }
   setStatus('configStatus', config.base_url && config.has_api_key ? '已保存' : '未保存', config.base_url && config.has_api_key ? 'ok' : 'neutral');
@@ -1303,6 +1399,8 @@ function readConfigForm() {
     feishu_app_secret: $('feishuAppSecret')?.value.trim() || '',
     feishu_verification_token: $('feishuVerificationToken')?.value.trim() || '',
     feishu_encrypt_key: $('feishuEncryptKey')?.value.trim() || '',
+    feishu_allowed_open_ids: $('feishuAllowedOpenIds')?.value.trim() || '',
+    feishu_allowed_chat_ids: $('feishuAllowedChatIds')?.value.trim() || '',
   };
 }
 
@@ -1430,6 +1528,14 @@ async function loadProject(projectId) {
   state.currentProjectId = project.project_id;
   state.sessionId = project.session_id;
   state.sourceFileName = project.source_file_name || '';
+  state.projectSource = {
+    source_channel: project.source_channel || '',
+    source_open_id: project.source_open_id || '',
+    source_chat_id: project.source_chat_id || '',
+    source_message_id: project.source_message_id || '',
+    source_text: project.source_text || '',
+    confirmed_at: project.confirmed_at || '',
+  };
   state.registerMode = project.register_mode || 'packages';
   state.followUp = project.follow_up || emptyFollowUp();
   state.ourQuotes = project.our_quotes || [];
@@ -1519,9 +1625,22 @@ function newTimeline() {
 }
 
 function bindEvents() {
+  document.querySelectorAll('.main-tab').forEach((node) => {
+    node.onclick = () => {
+      switchWorkspace(node.dataset.workspace);
+      if (node.dataset.workspace === 'bidWorkspace') {
+        const activePanel = document.querySelector('#bidWorkspace .nav-link.active')?.dataset.target || 'overviewPanel';
+        switchPanel(activePanel);
+      }
+    };
+  });
+
   document.querySelectorAll('.nav-link').forEach((node) => {
     node.onclick = () => switchPanel(node.dataset.target);
   });
+
+  bindClick('settingsToggleBtn', () => toggleSettings());
+  bindClick('settingsCloseBtn', () => toggleSettings(false));
 
   document.querySelectorAll('.market-analysis-summary button').forEach((node) => {
     node.addEventListener('click', (event) => event.stopPropagation());
@@ -1878,7 +1997,7 @@ async function init() {
     if (state.currentUser?.role === 'admin') {
       await loadUsers();
     }
-    switchPanel('marketSkillPanel');
+    switchPanel('overviewPanel');
   } catch (error) {
     if (!state.authToken) {
       window.location.href = '/login';

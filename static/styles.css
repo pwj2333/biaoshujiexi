@@ -1,11 +1,12 @@
 :root {
-  --bg-top: #f7f1e6;
-  --bg-bottom: #ebdfcb;
-  --panel: rgba(255, 251, 245, 0.9);
-  --panel-strong: #fffaf2;
-  --line: #decdb7;
+  --bg-top: #f3f6f4;
+  --bg-bottom: #e3ebe6;
+  --panel: rgba(255, 255, 255, 0.94);
+  --panel-strong: #fbfdfc;
+  --line: #cad8d1;
+  --line-soft: #dfe8e2;
   --text: #2a231d;
-  --muted: #6f6456;
+  --muted: #66736d;
   --accent: #b85c31;
   --accent-soft: rgba(184, 92, 49, 0.12);
   --green: #2c6b58;
@@ -14,7 +15,7 @@
   --warn-soft: rgba(164, 109, 31, 0.14);
   --danger: #9a4131;
   --danger-soft: rgba(154, 65, 49, 0.12);
-  --shadow: 0 18px 42px rgba(88, 64, 38, 0.12);
+  --shadow: 0 10px 28px rgba(49, 68, 58, 0.1);
 }
 
 * {
@@ -26,10 +27,7 @@ body {
   min-height: 100vh;
   color: var(--text);
   font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
-  background:
-    radial-gradient(circle at top left, rgba(184, 92, 49, 0.12), transparent 24%),
-    radial-gradient(circle at top right, rgba(44, 107, 88, 0.1), transparent 18%),
-    linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+  background: linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
 }
 
 button,
@@ -41,25 +39,115 @@ textarea {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 360px minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
   min-height: 100vh;
 }
 
-.sidebar {
+.app-header {
   position: sticky;
   top: 0;
-  height: 100vh;
-  overflow: auto;
-  padding: 24px 18px;
-  border-right: 1px solid rgba(222, 205, 183, 0.9);
-  background: rgba(247, 239, 227, 0.88);
-  backdrop-filter: blur(16px);
+  z-index: 12;
+  display: grid;
+  grid-template-columns: minmax(220px, 0.75fr) auto minmax(320px, 1fr);
+  gap: 16px;
+  align-items: center;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(251, 253, 252, 0.92);
+  backdrop-filter: blur(14px);
 }
 
-.brand-card,
-.upload-card,
+.app-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.app-title h1 {
+  font-size: 20px;
+  white-space: nowrap;
+}
+
+.main-tabs,
+.sub-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.main-tab,
+.sub-tabs .nav-link {
+  width: auto;
+  min-width: 92px;
+  padding: 9px 16px;
+  text-align: center;
+  background: transparent;
+}
+
+.main-tab.active,
+.sub-tabs .nav-link.active {
+  color: #fff;
+  background: var(--green);
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 30;
+  width: min(520px, 100vw);
+  height: 100vh;
+  overflow: auto;
+  padding: 18px;
+  border-left: 1px solid var(--line);
+  background: var(--panel-strong);
+  box-shadow: -18px 0 42px rgba(31, 48, 42, 0.16);
+}
+
+.settings-panel .config-card,
+.settings-section {
+  margin-bottom: 14px;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.settings-account-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-section #userNavBtn {
+  display: none !important;
+}
+
+.business-workspace {
+  display: none;
+}
+
+.business-workspace.active {
+  display: grid;
+  gap: 16px;
+}
+
 .config-card,
-.hero-panel,
 .content-panel,
 .summary-card,
 .analysis-card,
@@ -67,29 +155,13 @@ textarea {
 .chat-message,
 .empty-state {
   background: var(--panel);
-  border: 1px solid rgba(222, 205, 183, 0.85);
+  border: 1px solid var(--line);
   box-shadow: var(--shadow);
 }
 
-.brand-card,
-.upload-card,
 .config-card,
-.hero-panel,
 .content-panel {
-  border-radius: 24px;
-}
-
-.brand-card,
-.upload-card {
-  padding: 18px;
-  margin-bottom: 16px;
-}
-
-.brand-card {
-  background:
-    linear-gradient(140deg, rgba(184, 92, 49, 0.12), transparent 48%),
-    linear-gradient(320deg, rgba(44, 107, 88, 0.08), transparent 42%),
-    var(--panel);
+  border-radius: 12px;
 }
 
 .eyebrow {
@@ -148,10 +220,10 @@ select,
 textarea {
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: 8px;
   background: var(--panel-strong);
   color: var(--text);
-  padding: 12px 14px;
+  padding: 10px 12px;
 }
 
 textarea {
@@ -161,10 +233,10 @@ textarea {
 
 button {
   border: 0;
-  border-radius: 999px;
-  background: #ece2d2;
+  border-radius: 8px;
+  background: #e8eee9;
   color: var(--text);
-  padding: 11px 16px;
+  padding: 10px 14px;
   cursor: pointer;
   transition: transform 0.18s ease, background 0.18s ease;
 }
@@ -175,7 +247,7 @@ button:hover {
 
 button.primary {
   color: #fff;
-  background: linear-gradient(135deg, var(--accent), #d47a4d);
+  background: var(--green);
 }
 
 button.ghost {
@@ -203,11 +275,10 @@ button.ghost {
 }
 
 .history-query-card {
-  border: 1px solid rgba(222, 205, 183, 0.85);
-  border-radius: 22px;
-  background: rgba(255, 251, 245, 0.82);
-  padding: 18px;
-  box-shadow: var(--shadow);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
+  padding: 16px;
 }
 
 .project-list {
@@ -229,8 +300,8 @@ button.ghost {
 }
 
 .history-stat {
-  border: 1px solid rgba(222, 205, 183, 0.85);
-  border-radius: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
   background: rgba(255, 255, 255, 0.58);
   padding: 12px;
 }
@@ -251,20 +322,20 @@ button.ghost {
   width: 100%;
   text-align: left;
   background: rgba(255, 255, 255, 0.5);
-  border-radius: 16px;
+  border-radius: 8px;
 }
 
 .project-item {
   display: grid;
   gap: 4px;
   padding: 12px 14px;
-  border: 1px solid rgba(222, 205, 183, 0.85);
+  border: 1px solid var(--line);
 }
 
 .project-item.active,
 .nav-link.active {
-  background: linear-gradient(135deg, var(--accent-soft), rgba(44, 107, 88, 0.08));
-  color: var(--accent);
+  background: var(--green-soft);
+  color: var(--green);
 }
 
 .project-item strong {
@@ -308,6 +379,80 @@ button.ghost {
 .status-chip.error {
   color: var(--danger);
   background: var(--danger-soft);
+}
+
+.source-chip.feishu {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.market-source-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  line-height: 1.5;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.market-source-summary {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid rgba(222, 205, 183, 0.75);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.market-source-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.market-source-head span {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.market-source-summary p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.project-source-summary {
+  grid-column: 1 / -1;
+}
+
+.project-source-summary strong {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.project-source-summary em {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-style: normal;
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.project-source-summary small {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 .project-empty {
@@ -363,35 +508,38 @@ button.ghost {
 }
 
 .workspace {
-  padding: 24px;
+  padding: 18px 24px 24px;
   display: grid;
-  gap: 18px;
+  gap: 16px;
   align-content: start;
 }
 
-.hero-panel {
-  padding: 24px 26px;
+.workbar {
   display: grid;
-  grid-template-columns: 1.3fr 0.7fr;
-  gap: 18px;
-  background:
-    linear-gradient(130deg, rgba(184, 92, 49, 0.1), transparent 45%),
-    linear-gradient(320deg, rgba(44, 107, 88, 0.08), transparent 35%),
-    var(--panel);
+  grid-template-columns: minmax(220px, 1.1fr) minmax(260px, 1.2fr) minmax(160px, 0.7fr) minmax(140px, 0.6fr) auto;
+  gap: 12px;
+  align-items: end;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
 }
 
-.hero-note {
-  border: 1px solid rgba(222, 205, 183, 0.8);
-  border-radius: 20px;
-  padding: 18px;
-  background: rgba(255, 255, 255, 0.55);
+.workbar .field {
+  margin-bottom: 0;
+}
+
+.workbar-actions {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: 8px;
+  justify-content: flex-end;
+  min-width: 260px;
 }
 
 .content-panel {
-  padding: 22px;
+  padding: 18px;
 }
 
 .tracking-grid {
@@ -401,7 +549,7 @@ button.ghost {
 
 .market-grid {
   display: grid;
-  grid-template-columns: minmax(420px, 0.92fr) minmax(420px, 1.08fr);
+  grid-template-columns: minmax(360px, 0.88fr) minmax(380px, 1.12fr);
   gap: 16px;
   margin-bottom: 16px;
   align-items: start;
@@ -417,10 +565,9 @@ button.ghost {
   gap: 8px;
   padding: 6px;
   margin-bottom: 16px;
-  border: 1px solid rgba(222, 205, 183, 0.85);
-  border-radius: 999px;
-  background: rgba(255, 251, 245, 0.68);
-  box-shadow: var(--shadow);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
 }
 
 .market-tab {
@@ -430,7 +577,7 @@ button.ghost {
 
 .market-tab.active {
   color: #fff;
-  background: linear-gradient(135deg, var(--green), #3b806a);
+  background: var(--green);
 }
 
 .market-form {
@@ -474,33 +621,47 @@ button.ghost {
 }
 
 .market-ledger-card .project-list {
-  max-height: 62vh;
+  max-height: calc(100vh - 330px);
 }
 
 .market-editor-card {
   position: sticky;
-  top: 24px;
+  top: 82px;
   display: flex;
   flex-direction: column;
-  height: min(560px, calc(100vh - 48px));
-  max-height: calc(100vh - 48px);
+  height: min(520px, calc(100vh - 106px));
+  max-height: calc(100vh - 106px);
   overflow: hidden;
-  padding-bottom: 0;
+  padding: 0;
+}
+
+.market-editor-card > .tracking-head,
+.market-editor-card > .field {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 16px 18px 0;
+}
+
+.market-editor-card > .field textarea {
+  min-height: 92px;
 }
 
 .market-editor-scroll {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding-right: 4px;
-  padding-bottom: 8px;
+  margin-top: 12px;
+  padding: 0 18px 12px;
 }
 
 .market-editor-actions {
   flex-shrink: 0;
   justify-content: space-between;
   gap: 10px;
-  margin: 12px 0;
+  margin: 0;
+  padding: 12px 18px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--panel-strong);
 }
 
 .market-editor-actions button {
@@ -508,9 +669,7 @@ button.ghost {
 }
 
 .market-analysis-card {
-  background:
-    radial-gradient(circle at 12% 8%, rgba(44, 107, 88, 0.12), transparent 30%),
-    rgba(255, 251, 245, 0.9);
+  background: var(--panel);
   padding: 0;
   overflow: hidden;
 }
@@ -567,8 +726,8 @@ button.ghost {
 
 .market-chart-card {
   min-height: 280px;
-  border: 1px solid rgba(222, 205, 183, 0.85);
-  border-radius: 20px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
   padding: 14px;
   background: rgba(255, 255, 255, 0.55);
 }
@@ -630,10 +789,10 @@ button.ghost {
 }
 
 .tracking-card {
-  border: 1px solid rgba(222, 205, 183, 0.85);
-  border-radius: 22px;
-  background: rgba(255, 251, 245, 0.82);
-  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.84);
+  padding: 16px;
   box-shadow: var(--shadow);
 }
 
@@ -667,12 +826,10 @@ button.ghost {
 }
 
 .empty-state {
-  border-radius: 20px;
-  padding: 42px 24px;
+  border-radius: 10px;
+  padding: 36px 22px;
   text-align: center;
-  background:
-    linear-gradient(135deg, rgba(184, 92, 49, 0.05), rgba(44, 107, 88, 0.05)),
-    var(--panel);
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .result-section {
@@ -689,7 +846,7 @@ button.ghost {
 .summary-card,
 .analysis-card,
 .review-item {
-  border-radius: 20px;
+  border-radius: 10px;
   padding: 16px;
 }
 
@@ -736,7 +893,7 @@ button.ghost {
   border-radius: 999px;
   padding: 6px 12px;
   font-size: 12px;
-  background: #eee3d4;
+  background: #e8eee9;
 }
 
 .pill.ok,
@@ -758,7 +915,7 @@ button.ghost {
 }
 
 .pill.neutral {
-  background: #efe4d6;
+  background: #e8eee9;
 }
 
 .table-wrap {
@@ -781,7 +938,7 @@ td {
   padding: 10px 8px;
   text-align: left;
   vertical-align: top;
-  border-bottom: 1px solid rgba(222, 205, 183, 0.9);
+  border-bottom: 1px solid var(--line-soft);
 }
 
 th {
@@ -812,7 +969,7 @@ button.danger {
 }
 
 .chat-message {
-  border-radius: 18px;
+  border-radius: 10px;
   padding: 14px 16px;
 }
 
@@ -859,8 +1016,30 @@ button.danger {
 }
 
 @media (max-width: 1120px) {
-  .app-shell {
+  .app-header {
     grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .main-tabs,
+  .sub-tabs {
+    justify-content: flex-start;
+    overflow-x: auto;
+  }
+
+  .header-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .workbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workbar-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+    min-width: 0;
   }
 
   .market-grid {
@@ -871,30 +1050,21 @@ button.danger {
     position: static;
     height: auto;
     max-height: none;
-    overflow: visible;
+    overflow: hidden;
   }
 
   .market-editor-scroll {
-    overflow: visible;
-    padding-right: 0;
+    max-height: 48vh;
   }
 
   .market-editor-actions {
-    margin: 0;
+    flex-wrap: wrap;
   }
 
   .market-report-layout {
     grid-template-columns: 1fr;
   }
 
-  .sidebar {
-    position: static;
-    height: auto;
-    border-right: 0;
-    border-bottom: 1px solid rgba(222, 205, 183, 0.9);
-  }
-
-  .hero-panel,
   .summary-grid,
   .analysis-grid,
   .history-stats,
@@ -905,11 +1075,12 @@ button.danger {
 }
 
 @media (max-width: 760px) {
-  .workspace,
-  .sidebar {
+  .app-header,
+  .workspace {
     padding: 16px;
   }
 
+  .app-title,
   .panel-head,
   .section-head,
   .button-row,
@@ -917,6 +1088,26 @@ button.danger {
   .history-summary {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .workbar {
+    grid-template-columns: 1fr;
+  }
+
+  .main-tab,
+  .sub-tabs .nav-link,
+  .market-tab,
+  button {
+    min-width: 0;
+  }
+
+  .settings-panel {
+    width: 100vw;
+    padding: 16px;
+  }
+
+  .market-editor-actions button {
+    width: 100%;
   }
 }
 .login-overlay {
