@@ -20,6 +20,7 @@
         <div class="header-actions">
           <span id="configStatus" class="pill neutral">未保存</span>
           <span id="feishuStatus" class="pill neutral">未启用</span>
+          <button id="agentToggleBtn" class="primary" title="打开全局 AI 助手">AI 助手</button>
           <button id="settingsToggleBtn">系统设置</button>
           <button id="logoutBtn" class="ghost compact-logout">退出登录</button>
         </div>
@@ -462,6 +463,28 @@
         </section>
       </main>
     </div>
+    <aside id="agentDrawer" class="agent-drawer hidden" aria-label="全局 AI 助手">
+      <div class="agent-drawer-head">
+        <div>
+          <h2>全局 AI 助手</h2>
+          <span class="pill neutral">可查询、识别、修改草稿、生成报告和导出</span>
+        </div>
+        <button id="agentCloseBtn" class="ghost" title="关闭 AI 助手">关闭</button>
+      </div>
+      <div id="agentMessages" class="chat-box agent-messages"></div>
+      <div id="agentPending" class="agent-pending hidden"></div>
+      <div class="agent-compose">
+        <textarea id="agentInput" rows="3" placeholder="例如：打开当前货盘，把最终执行船舶改成恒州008"></textarea>
+        <div class="agent-compose-actions">
+          <label class="agent-file-button" title="上传标书附件">
+            <span>添加标书</span>
+            <input id="agentFileInput" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx" />
+          </label>
+          <span id="agentFileName" class="agent-file-name">未选择附件</span>
+          <button id="agentSendBtn" class="primary">发送</button>
+        </div>
+      </div>
+    </aside>
     <div id="toast" class="toast hidden"></div>
     <script src="/static/app.js"></script>
   </body>

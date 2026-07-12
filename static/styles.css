@@ -116,6 +116,97 @@ textarea {
   box-shadow: -18px 0 42px rgba(31, 48, 42, 0.16);
 }
 
+.agent-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 28;
+  display: grid;
+  grid-template-rows: auto 1fr auto auto;
+  width: min(520px, 100vw);
+  height: 100vh;
+  padding: 18px;
+  border-left: 1px solid var(--line);
+  background: var(--panel-strong);
+  box-shadow: -18px 0 42px rgba(31, 48, 42, 0.16);
+}
+
+.agent-drawer-head,
+.agent-compose-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-drawer-head {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.agent-drawer-head h2 {
+  margin-bottom: 6px;
+  font-size: 18px;
+}
+
+.agent-messages {
+  min-height: 0;
+  max-height: none;
+  margin: 14px 0;
+  padding: 4px;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+.agent-pending {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--warn-soft);
+  line-height: 1.5;
+}
+
+.agent-compose {
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.agent-compose textarea {
+  min-height: 84px;
+  margin-bottom: 10px;
+}
+
+.agent-compose-actions {
+  justify-content: flex-start;
+}
+
+.agent-file-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--panel);
+}
+
+.agent-file-button input {
+  display: none;
+}
+
+.agent-file-name {
+  flex: 1;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .settings-panel .config-card,
 .settings-section {
   margin-bottom: 14px;
@@ -1102,6 +1193,11 @@ button.danger {
   }
 
   .settings-panel {
+    width: 100vw;
+    padding: 16px;
+  }
+
+  .agent-drawer {
     width: 100vw;
     padding: 16px;
   }

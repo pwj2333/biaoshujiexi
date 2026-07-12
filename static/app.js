@@ -37,6 +37,8 @@ const state = {
   marketStats: {},
   marketRequestSeq: 0,
   marketReport: null,
+  agentConversationId: localStorage.getItem('shipping_agent_conversation_id') || '',
+  agentTranscript: [],
 };
 
 const presets = {
@@ -108,6 +110,7 @@ const marketCargoFields = [
   { key: 'currency', label: '币种', type: 'select', options: ['CNY', 'USD'] },
   { key: 'route', label: '航线' },
   { key: 'cargo_standard_name', label: '货品标准名' },
+  { key: 'executing_vessel', label: '最终执行船舶' },
   { key: 'market_info', label: '市场了解信息', type: 'textarea' },
   { key: 'loss_reason', label: '未达成/放弃原因', type: 'textarea' },
   { key: 'competitor_name', label: '竞争对手' },
@@ -730,6 +733,179 @@ function appendChat(role, text) {
   $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
 }
 
+function agentPageContext() {
+  const workspace = document.querySelector('.main-tab.active')?.dataset.workspace === 'marketWorkspace' ? 'market' : 'bid';
+  const panel = document.querySelector('#bidWorkspace .nav-link.active')?.dataset.target || '';
+  return {
+    workspace,
+    panel,
+    market_kind: state.marketKind,
+    current_market_record_id: state.marketCurrentId,
+    market_record: state.marketRecord,
+    filters: workspace === 'market' ? marketFilters() : currentHistoryFilters(),
+    current_project_id: state.currentProjectId,
+    project_form: {
+      title: $('projectTitle')?.value.trim() || '',
+      follow_up: state.followUp,
+      our_quotes: state.ourQuotes,
+      competitor_quotes: state.competitorQuotes,
+      timeline: state.timeline,
+    },
+    session_id: state.sessionId,
+  };
+}
+
+function renderAgentMessages() {
+  const node = $('agentMessages');
+  if (!node) return;
+  node.innerHTML = (state.agentTranscript || [])
+    .map((item) => `<div class="chat-message ${item.role === 'user' ? 'user' : ''}"><span>${item.role === 'user' ? '你' : 'AI'}</span><p>${escapeHtml(normalizeText(item.content)).replace(/\n/g, '<br>')}</p></div>`)
+    .join('');
+  node.scrollTop = node.scrollHeight;
+}
+
+function setAgentPending(pending = {}) {
+  const node = $('agentPending');
+  if (!node) return;
+  const changes = pending.changes || {};
+  const rows = Object.entries(changes).map(([key, value]) => `${key}：${value.before || '空'} → ${value.after || '空'}`);
+  node.classList.toggle('hidden', !pending.type);
+  node.textContent = pending.type ? `待确认变更${rows.length ? `：${rows.join('；')}` : ''}。回复“确认保存”或“取消”。` : '';
+}
+
+function toggleAgentDrawer(forceOpen = null) {
+  const drawer = $('agentDrawer');
+  if (!drawer) return;
+  const open = forceOpen === null ? drawer.classList.contains('hidden') : forceOpen;
+  drawer.classList.toggle('hidden', !open);
+  if (open) {
+    renderAgentMessages();
+    $('agentInput')?.focus();
+  }
+}
+
+async function loadAgentSession() {
+  if (!state.agentConversationId) return;
+  try {
+    const result = await request(`/api/agent/session/${state.agentConversationId}`);
+    state.agentTranscript = result.transcript || [];
+    renderAgentMessages();
+    setAgentPending(result.pending_change || {});
+  } catch (error) {
+    state.agentConversationId = '';
+    localStorage.removeItem('shipping_agent_conversation_id');
+  }
+}
+
+async function applyAgentActions(actions = []) {
+  for (const action of actions) {
+    if (!action || !action.type) continue;
+    if (action.type === 'navigate') {
+      if (action.workspace === 'market') {
+        switchWorkspace('marketWorkspace');
+        if (action.kind && action.kind !== state.marketKind) {
+          state.marketKind = action.kind;
+          setMarketRecord();
+          await loadMarketRecords();
+        }
+      } else {
+        switchWorkspace('bidWorkspace');
+        if (action.panel) switchPanel(action.panel);
+      }
+    } else if (action.type === 'load_market_record' || action.type === 'patch_market_form') {
+      switchWorkspace('marketWorkspace');
+      if (action.kind && action.kind !== state.marketKind) state.marketKind = action.kind;
+      if (action.record) {
+        setMarketRecord(action.record, { persisted: action.persisted !== false });
+      } else if (action.record_id) {
+        const result = await request(`/api/market-skill/${state.marketKind}/${action.record_id}`);
+        setMarketRecord(result.record, { persisted: true });
+      }
+      await loadMarketRecords();
+    } else if (action.type === 'load_project') {
+      await loadProject(action.project_id);
+    } else if (action.type === 'patch_project_form') {
+      switchWorkspace('bidWorkspace');
+      switchPanel('trackingPanel');
+      const project = action.project || {};
+      state.followUp = project.follow_up || state.followUp;
+      state.ourQuotes = project.our_quotes || state.ourQuotes;
+      state.competitorQuotes = project.competitor_quotes || state.competitorQuotes;
+      state.timeline = project.timeline || state.timeline;
+      renderTracking();
+      bindDynamicEditors();
+    } else if (action.type === 'render_market_report') {
+      switchWorkspace('marketWorkspace');
+      state.marketKind = action.kind || state.marketKind;
+      state.marketReport = action.report || null;
+      renderMarketList();
+    } else if (action.type === 'apply_bid_result') {
+      switchWorkspace('bidWorkspace');
+      if (action.session_id) state.sessionId = action.session_id;
+      if (action.result) {
+        applyResult(action.result);
+        switchPanel('overviewPanel');
+      }
+    } else if (action.type === 'export') {
+      await runAgentExport(action.export_type);
+    }
+  }
+}
+
+async function runAgentExport(exportType) {
+  if (exportType === 'overview') {
+    return downloadFile('/api/export/overview', { title: $('projectTitle').value.trim(), result: collectResultPayload(), follow_up: state.followUp, our_quotes: state.ourQuotes, competitor_quotes: state.competitorQuotes, timeline: state.timeline }, '解析总览.xlsx');
+  }
+  if (exportType === 'extraction') return downloadFile('/api/export/extraction', { result: collectResultPayload() }, '标书摘取.xlsx');
+  if (exportType === 'register') return downloadFile('/api/export/register', { rows: currentRegisterRows(), sheet_name: $('sheetName').value }, '招标登记.xlsx');
+  if (exportType === 'ledger') return downloadFile('/api/export/ledger', currentHistoryFilters(), '历史台账汇总.xlsx');
+  if (exportType === 'our_quotes') return downloadFile('/api/export/our-quotes', { title: $('projectTitle').value.trim(), follow_up: state.followUp, rows: state.ourQuotes }, '我司报价一览表.xlsx');
+  if (exportType === 'competitor_quotes') return downloadFile('/api/export/competitor-quotes', { title: $('projectTitle').value.trim(), follow_up: state.followUp, rows: state.competitorQuotes }, '竞对报价对比.xlsx');
+  if (exportType === 'market_ledger') return downloadFile('/api/export/market-skill', { kind: state.marketKind, ...marketFilters() }, state.marketKind === 'cargo' ? '商机收集台账.xlsx' : '新造船收集台账.xlsx');
+  if (exportType === 'market_report') {
+    if (!state.marketReport) await generateMarketReport();
+    return downloadFile('/api/export/market-skill-report', { kind: state.marketKind, report: state.marketReport, format: 'docx' }, state.marketKind === 'cargo' ? '商机市场AI分析报告.docx' : '新造船市场AI分析报告.docx');
+  }
+}
+
+async function sendAgentMessage(forcedText = '') {
+  const input = $('agentInput');
+  const fileInput = $('agentFileInput');
+  const text = (forcedText || input?.value || '').trim();
+  const file = fileInput?.files?.[0] || null;
+  if (!text && !file) return;
+  const displayText = text || `上传文件：${file.name}`;
+  state.agentTranscript.push({ role: 'user', content: displayText });
+  renderAgentMessages();
+  if (input) input.value = '';
+  const formData = new FormData();
+  formData.append('message', text);
+  formData.append('conversation_id', state.agentConversationId || '');
+  formData.append('page_context', JSON.stringify(agentPageContext()));
+  if (file) formData.append('file', file);
+  if (fileInput) fileInput.value = '';
+  if ($('agentFileName')) $('agentFileName').textContent = '未选择附件';
+  const button = $('agentSendBtn');
+  if (button) {
+    button.disabled = true;
+    button.textContent = '处理中...';
+  }
+  try {
+    const result = await request('/api/agent/chat', { method: 'POST', body: formData });
+    state.agentConversationId = result.conversation_id || state.agentConversationId;
+    localStorage.setItem('shipping_agent_conversation_id', state.agentConversationId);
+    state.agentTranscript.push({ role: 'assistant', content: result.answer || '已处理。' });
+    renderAgentMessages();
+    setAgentPending(result.pending_change || {});
+    await applyAgentActions(result.actions || []);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = '发送';
+    }
+  }
+}
+
 function applyResult(result) {
   state.documentSummary = result.document_summary;
   state.extractionFields = result.extraction_fields;
@@ -832,6 +1008,7 @@ function emptyMarketRecord(kind = state.marketKind) {
         currency: 'CNY',
         route: '',
         cargo_standard_name: '',
+        executing_vessel: '',
         market_info: '',
         loss_reason: '',
         competitor_name: '',
@@ -867,6 +1044,7 @@ function setMarketRecord(record = null, { persisted = false } = {}) {
   if ($('marketReportPrompt') && !$('marketReportPrompt').value.trim()) $('marketReportPrompt').value = defaultMarketPrompt();
   renderMarketForm();
   setStatus('marketSaveStatus', state.marketCurrentId ? '已加载记录' : '新记录', state.marketCurrentId ? 'ok' : 'neutral');
+  if ($('marketExtractBtn')) $('marketExtractBtn').textContent = state.marketCurrentId ? 'AI更新当前记录' : 'AI识别填表';
 }
 
 function marketInputMarkup(field, value) {
@@ -1063,6 +1241,7 @@ function renderMarketReport() {
           ['price', '成交价'],
           ['price_unit', '单位'],
           ['currency', '币种'],
+          ['executing_vessel', '最终执行船舶'],
           ['competitor_price', '竞对价'],
         ]
       : [
@@ -1129,7 +1308,7 @@ function renderMarketList() {
       const chip = state.marketKind === 'cargo' ? item.status : item.stage;
       const sub =
         state.marketKind === 'cargo'
-          ? `${item.tonnage || '-'} | ${item.cargo_owner || '-'} | ${item.final_price || '未录成交价'}`
+          ? `${item.tonnage || '-'} | ${item.cargo_owner || '-'} | ${item.final_price || '未录成交价'}${item.executing_vessel ? ` | 执行船：${item.executing_vessel}` : ''}`
           : `${item.dwt || '-'} | ${item.owner || '-'} | ${item.delivery_time || '-'}`;
       const sourceLabel = marketSourceLabel(item);
       const sourceText = marketSourceText(item);
@@ -1235,10 +1414,15 @@ async function extractMarketRecord() {
   const result = await request('/api/market-skill/extract', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ kind: state.marketKind, text }),
+    body: JSON.stringify({
+      kind: state.marketKind,
+      text,
+      record_id: state.marketCurrentId,
+      current_record: { ...state.marketRecord, raw_text: text },
+    }),
   });
-  setMarketRecord(result.record);
-  showToast('已识别并填入表单，请人工确认后保存');
+  setMarketRecord(result.record, { persisted: result.mode === 'update' });
+  showToast(result.mode === 'update' ? 'AI 已更新当前记录表单，请确认后保存' : '已识别并填入表单，请人工确认后保存');
 }
 
 async function saveMarketRecord() {
@@ -1636,11 +1820,38 @@ function bindEvents() {
   });
 
   document.querySelectorAll('.nav-link').forEach((node) => {
-    node.onclick = () => switchPanel(node.dataset.target);
+    node.onclick = () => {
+      if (node.dataset.target === 'chatPanel') {
+        toggleAgentDrawer(true);
+        return;
+      }
+      switchPanel(node.dataset.target);
+    };
   });
 
   bindClick('settingsToggleBtn', () => toggleSettings());
   bindClick('settingsCloseBtn', () => toggleSettings(false));
+  bindClick('agentToggleBtn', () => toggleAgentDrawer());
+  bindClick('agentCloseBtn', () => toggleAgentDrawer(false));
+  bindClick('agentSendBtn', async () => {
+    try {
+      await sendAgentMessage();
+    } catch (error) {
+      state.agentTranscript.push({ role: 'assistant', content: `处理失败：${error.message}` });
+      renderAgentMessages();
+      showToast(error.message, true);
+    }
+  });
+  bindChange('agentFileInput', () => {
+    const file = $('agentFileInput')?.files?.[0];
+    if ($('agentFileName')) $('agentFileName').textContent = file?.name || '未选择附件';
+  });
+  $('agentInput')?.addEventListener('keydown', async (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+      event.preventDefault();
+      $('agentSendBtn')?.click();
+    }
+  });
 
   document.querySelectorAll('.market-analysis-summary button').forEach((node) => {
     node.addEventListener('click', (event) => event.stopPropagation());
@@ -1816,8 +2027,8 @@ function bindEvents() {
 
   bindClick('askDefaultBtn', async () => {
     try {
-      await sendChat('请重新总结这份标书的关键节点、资格要求、报价要求、评标标准和主要风险。');
-      switchPanel('chatPanel');
+      toggleAgentDrawer(true);
+      await sendAgentMessage('请重新总结当前标书的关键节点、资格要求、报价要求、评标标准和主要风险。');
     } catch (error) {
       showToast(error.message, true);
     }
@@ -1994,6 +2205,7 @@ async function init() {
     setMarketRecord();
     await loadProjects();
     await loadMarketRecords();
+    await loadAgentSession();
     if (state.currentUser?.role === 'admin') {
       await loadUsers();
     }

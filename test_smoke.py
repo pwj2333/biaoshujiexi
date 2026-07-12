@@ -368,6 +368,7 @@ cargo_deal = {
     'deal_date': '2026-06-15',
     'status': '\u5df2\u6210\u4ea4',
     'deal_price': '128',
+    'executing_vessel': 'smoke-vessel-008',
     'price_unit': '\u5143/\u5428',
     'currency': 'CNY',
 }
@@ -395,6 +396,7 @@ try:
     assert cargo_report['source_stats']['deal_count'] == 1
     assert cargo_report['trend_points'][0]['avg_price'] == 128
     assert cargo_report['detail_rows'][0]['price'] == 128
+    assert cargo_report['detail_rows'][0]['executing_vessel'] == 'smoke-vessel-008'
     cargo_report_export_resp = client.post(
         '/api/export/market-skill-report',
         json={'kind': 'cargo', 'report': cargo_report, 'format': 'xlsx'},
@@ -416,6 +418,140 @@ try:
 finally:
     cleanup_market('cargo', cargo_deal_id)
     cleanup_market('cargo', cargo_open_id)
+
+import app as app_module_for_market_update
+old_market_extract_json = app_module_for_market_update.market_extract_json
+app_module_for_market_update.market_extract_json = lambda kind, text: None
+old_cargo_id = ''
+try:
+    old_cargo_resp = client.post(
+        '/api/market-skill/cargo',
+        json={'kind': 'cargo', 'record': {
+            'cargo_name': 'smoke-existing-cargo',
+            'tonnage': '3000吨',
+            'load_port': '宁波',
+            'discharge_port': '珠海',
+            'cargo_owner': '旧货主',
+            'status': '跟进中',
+            'executing_vessel': '旧船001',
+        }},
+        headers=auth_headers,
+    )
+    assert old_cargo_resp.status_code == 200
+    old_cargo = old_cargo_resp.json()['record']
+    old_cargo_id = old_cargo['id']
+    extract_update_resp = client.post(
+        '/api/market-skill/extract',
+        json={
+            'kind': 'cargo',
+            'record_id': old_cargo_id,
+            'current_record': old_cargo,
+            'text': '最终确定使用恒州008，最终成交价175',
+        },
+        headers=auth_headers,
+    )
+    assert extract_update_resp.status_code == 200
+    extracted_update = extract_update_resp.json()
+    assert extracted_update['mode'] == 'update'
+    assert extracted_update['record']['id'] == old_cargo_id
+    assert extracted_update['record']['cargo_name'] == 'smoke-existing-cargo'
+    assert extracted_update['record']['load_port'] == '宁波'
+    assert extracted_update['record']['executing_vessel'] == '恒州008'
+    assert extracted_update['record']['deal_price'] == '175'
+    records_before_update = client.get('/api/market-skill/cargo', params={'q': 'smoke-existing-cargo'}, headers=auth_headers).json()['items']
+    assert [item['id'] for item in records_before_update] == [old_cargo_id]
+    update_save_resp = client.put(
+        f'/api/market-skill/cargo/{old_cargo_id}',
+        json={'kind': 'cargo', 'record': extracted_update['record']},
+        headers=auth_headers,
+    )
+    assert update_save_resp.status_code == 200
+    records_after_update = client.get('/api/market-skill/cargo', params={'q': 'smoke-existing-cargo'}, headers=auth_headers).json()['items']
+    assert [item['id'] for item in records_after_update] == [old_cargo_id]
+    after_update = client.get(f'/api/market-skill/cargo/{old_cargo_id}', headers=auth_headers)
+    assert after_update.status_code == 200
+    version_before = after_update.json()['record']
+    assert version_before['executing_vessel'] == '恒州008'
+    concurrent_update = client.put(
+        f'/api/market-skill/cargo/{old_cargo_id}',
+        json={'kind': 'cargo', 'record': {**version_before, 'remark': '并发更新'}},
+        headers=auth_headers,
+    )
+    assert concurrent_update.status_code == 200
+    assert concurrent_update.json()['record']['updated_at'] != version_before['updated_at']
+    stale_update = client.put(
+        f'/api/market-skill/cargo/{old_cargo_id}',
+        json={'kind': 'cargo', 'record': {**version_before, 'executing_vessel': '不应覆盖'}},
+        headers=auth_headers,
+    )
+    assert stale_update.status_code == 409
+finally:
+    app_module_for_market_update.market_extract_json = old_market_extract_json
+    if old_cargo_id:
+        cleanup_market('cargo', old_cargo_id)
+
+agent_original_config = load_config()
+agent_original_call = app_module_for_market_update.call_chat_completion
+agent_cargo_id = ''
+agent_conversation_id = ''
+try:
+    save_config({**agent_original_config, 'base_url': 'https://example.com/v1', 'api_key': 'sk-agent-smoke', 'model': 'agent-smoke'})
+    agent_record_resp = client.post(
+        '/api/market-skill/cargo',
+        json={'kind': 'cargo', 'record': {'cargo_name': 'smoke-agent-cargo', 'load_port': '宁波', 'discharge_port': '珠海', 'tonnage': '3000吨', 'status': '跟进中', 'executing_vessel': '旧船002'}},
+        headers=auth_headers,
+    )
+    assert agent_record_resp.status_code == 200
+    agent_record = agent_record_resp.json()['record']
+    agent_cargo_id = agent_record['id']
+
+    def fake_web_agent_chat(config, *, system_prompt, user_prompt, temperature=None):
+        if 'available_tools' in user_prompt:
+            return json.dumps({'reply': '', 'tool_calls': [{'name': 'draft_market_record_update', 'arguments': {'kind': 'cargo', 'record_id': agent_cargo_id, 'text': '最终执行船舶改成恒州008'}}], 'needs_confirmation': False, 'pending_update': {}}, ensure_ascii=False)
+        if 'available_tools' not in user_prompt and '待确认' in user_prompt:
+            return '已生成当前货盘的变更预览，请确认保存。'
+        return '已保存当前货盘的变更。'
+
+    app_module_for_market_update.market_extract_json = lambda kind, text: None
+    app_module_for_market_update.call_chat_completion = fake_web_agent_chat
+    page_context = json.dumps({'workspace': 'market', 'market_kind': 'cargo', 'current_market_record_id': agent_cargo_id, 'market_record': agent_record})
+    agent_chat_resp = client.post(
+        '/api/agent/chat',
+        data={'message': '把当前货盘最终执行船舶改成恒州008', 'page_context': page_context},
+        headers=auth_headers,
+    )
+    assert agent_chat_resp.status_code == 200
+    agent_result = agent_chat_resp.json()
+    agent_conversation_id = agent_result['conversation_id']
+    assert agent_result['pending_change']['record_id'] == agent_cargo_id
+    assert any(action['type'] == 'patch_market_form' for action in agent_result['actions'])
+    assert '恒州008' in agent_result['answer']
+
+    confirm_resp = client.post(
+        '/api/agent/chat',
+        data={'message': '确认保存', 'conversation_id': agent_conversation_id, 'page_context': page_context},
+        headers=auth_headers,
+    )
+    assert confirm_resp.status_code == 200
+    assert '保存' in confirm_resp.json()['answer']
+    saved_agent_record = client.get(f'/api/market-skill/cargo/{agent_cargo_id}', headers=auth_headers).json()['record']
+    assert saved_agent_record['executing_vessel'] == '恒州008'
+    refused_resp = client.post(
+        '/api/agent/chat',
+        data={'message': '删除当前货盘', 'conversation_id': agent_conversation_id, 'page_context': page_context},
+        headers=auth_headers,
+    )
+    assert refused_resp.status_code == 200
+    assert '不能删除记录' in refused_resp.json()['answer']
+    assert client.get(f'/api/market-skill/cargo/{agent_cargo_id}', headers=auth_headers).status_code == 200
+finally:
+    app_module_for_market_update.market_extract_json = old_market_extract_json
+    app_module_for_market_update.call_chat_completion = agent_original_call
+    save_config(agent_original_config)
+    if agent_cargo_id:
+        cleanup_market('cargo', agent_cargo_id)
+    if agent_conversation_id:
+        (app_module_for_market_update.AGENT_SESSIONS_DIR / f'{agent_conversation_id}.json').unlink(missing_ok=True)
 
 newbuilding_record = {
     'stage': '\u5df2\u5b8c\u9020\u5e76\u51fa\u5382\u6295\u8fd0',
